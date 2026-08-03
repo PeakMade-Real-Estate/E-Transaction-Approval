@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Request Submitted — E-Transaction Approval Dashboard{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8 col-xl-7">
+
+        <!-- Success Alert -->
+        <div class="alert alert-success d-flex align-items-start gap-3 shadow-sm mb-4" role="alert">
+            <i class="fas fa-check-circle fa-2x flex-shrink-0 mt-1"></i>
+            <div>
+                <h5 class="alert-heading mb-1">Treasury Request Submitted</h5>
+                <p class="mb-0 small">
+                    Your request has been recorded and is pending approval routing.
+                    A mock confirmation summary is shown below.
+                </p>
+            </div>
+        </div>
+
+        {% if record %}
+        <!-- Request Summary Card -->
+        <div class="card shadow-sm mb-4">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <div>
+                    <h5 class="mb-0 fw-bold">
+                        <i class="fas fa-file-invoice-dollar me-2 text-primary"></i>
+                        {{ record.request_id }}
+                    </h5>
+                    <small class="text-muted">Submitted {{ record.submitted_date }}</small>
+                </div>
+                <span class="badge bg-info text-dark fs-6 px-3 py-2">Submitted</span>
+            </div>
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Request Type</span>
+                        <div class="fw-semibold">{{ record.request_type or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Amount</span>
+                        <div class="fw-bold fs-5">{{ record.amount | currency }} {{ record.currency }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Required Approval Tier</span>
+                        <div>
+                            <span class="badge
+                                {% if 'CFO' in record.approval_tier %}badge-cfo tier-badge-cfo
+                                {% elif 'Vice' in record.approval_tier %}tier-badge-vp
+                                {% elif 'Controller' in record.approval_tier %}tier-badge-controller
+                                {% else %}tier-badge-sam{% endif %}
+                                px-2 py-1">
+                                {{ record.approval_tier }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Property / Department</span>
+                        <div>{{ record.property_dept or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Prepared By</span>
+                        <div>{{ record.prepared_by or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Treasury Service Date</span>
+                        <div>{{ record.treasury_service_date or '—' }}</div>
+                    </div>
+                    {% if record.urgent %}
+                    <div class="col-12">
+                        <div class="alert alert-danger py-2 small mb-0">
+                            <i class="fas fa-exclamation-circle me-1"></i>
+                            <strong>URGENT:</strong> {{ record.urgency_reason }}
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% if record.over_1m %}
+                    <div class="col-12">
+                        <div class="high-value-banner small">
+                            <i class="fas fa-star me-2"></i>
+                            <strong>High-Value Transaction (&gt;$1M):</strong>
+                            Additional verbal and written CFO approval is required before release.
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- What Happens Next -->
+        <div class="card shadow-sm mb-4">
+            <div class="card-header bg-light">
+                <h6 class="mb-0 fw-bold text-muted text-uppercase small">
+                    <i class="fas fa-route me-1"></i> What Happens Next (Prototype Workflow)
+                </h6>
+            </div>
+            <div class="card-body p-0">
+                <ul class="list-group list-group-flush small">
+                    <li class="list-group-item d-flex align-items-start gap-2">
+                        <span class="badge bg-info text-dark mt-1">1</span>
+                        Request routed to Controller / Approver for initial review
+                        {# [WORKFLOW] TODO: Trigger Power Automate or approval routing engine #}
+                    </li>
+                    {% if record.amount > 500000 %}
+                    <li class="list-group-item d-flex align-items-start gap-2">
+                        <span class="badge badge-orange mt-1">2</span>
+                        VP approval required (amount &gt; $500,000)
+                    </li>
+                    {% endif %}
+                    {% if record.amount > 1000000 %}
+                    <li class="list-group-item d-flex align-items-start gap-2">
+                        <span class="badge bg-danger mt-1">3</span>
+                        CFO verbal and written approval required (amount &gt; $1,000,000)
+                        {# [ESIGN] TODO: Trigger DocuSign or written approval workflow #}
+                    </li>
+                    {% endif %}
+                    <li class="list-group-item d-flex align-items-start gap-2">
+                        <span class="badge bg-primary mt-1">★</span>
+                        Treasury review and final release by authorized {{ record.approval_tier }}
+                        {# [BANKING] TODO: Connect to Wells Fargo treasury release workflow #}
+                    </li>
+                </ul>
+            </div>
+        </div>
+
+        {% else %}
+        <div class="alert alert-warning">
+            <i class="fas fa-exclamation-triangle me-1"></i>
+            Request details not found. The session may have expired.
+        </div>
+        {% endif %}
+
+        <!-- Prototype Notice -->
+        <div class="card border-warning mb-4">
+            <div class="card-body py-2 d-flex align-items-center gap-2">
+                <i class="fas fa-flask text-warning fa-lg"></i>
+                <small class="text-muted">
+                    <strong>Prototype / Demo Data Only.</strong>
+                    This submission was saved to session memory. No real workflow was triggered.
+                    In production, this would route to the approval engine, notify the approver, and log to the audit trail.
+                </small>
+            </div>
+        </div>
+
+        <!-- Action Buttons -->
+        <div class="d-flex gap-3 flex-wrap">
+            {% if record %}
+            <a href="{{ url_for('request_detail', request_id=record.request_id) }}"
+               class="btn btn-outline-primary">
+                <i class="fas fa-eye me-1"></i> View Request Detail
+            </a>
+            {% endif %}
+            <a href="{{ url_for('dashboard') }}" class="btn btn-primary">
+                <i class="fas fa-table-columns me-1"></i> Back to Dashboard
+            </a>
+            <a href="{{ url_for('intake') }}" class="btn btn-outline-secondary">
+                <i class="fas fa-plus me-1"></i> Submit Another Request
+            </a>
+        </div>
+
+    </div>
+</div>
+{% endblock %}

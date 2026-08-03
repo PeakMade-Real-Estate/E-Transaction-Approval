@@ -1,0 +1,857 @@
+{% extends "base.html" %}
+{% block title %}New Treasury Request — E-Transaction Approval Dashboard{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
+    <div>
+        <h2 class="mb-1 fw-bold">
+            <i class="fas fa-file-invoice-dollar me-2 text-primary"></i>New Treasury Request
+        </h2>
+        <p class="text-muted mb-0 small">
+            Complete all sections. Fields marked <span class="text-danger fw-bold">*</span> are required.
+            &ensp;<span class="badge bg-warning text-dark"><i class="fas fa-flask me-1"></i>Demo — No real data submitted</span>
+        </p>
+    </div>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="fas fa-arrow-left me-1"></i> Back to Dashboard
+    </a>
+</div>
+
+<div class="row g-4">
+
+    <!-- ═══════════════════════════════════════════════════════
+         MAIN FORM COLUMN
+    ════════════════════════════════════════════════════════ -->
+    <div class="col-xl-8">
+        <form method="POST" action="{{ url_for('intake_submit') }}"
+              enctype="multipart/form-data" id="intake-form" novalidate>
+
+            <!-- ══ SECTION A: Request Overview ═══════════════════════ -->
+            <div class="accordion-item form-section-card mb-3 shadow-sm">
+                <h2 class="accordion-header" id="headA">
+                    <button class="accordion-button" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sectionA"
+                            aria-expanded="true" aria-controls="sectionA">
+                        <span class="section-icon bg-primary text-white">A</span>
+                        Request Overview
+                    </button>
+                </h2>
+                <div id="sectionA" class="accordion-collapse collapse show">
+                    <div class="accordion-body pt-3">
+                        <div class="row g-3">
+
+                            <!-- Request Type -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="request_type">
+                                    Request Type <span class="text-danger">*</span>
+                                </label>
+                                <select class="form-select" id="request_type" name="request_type" required>
+                                    <option value="">— Select Type —</option>
+                                    <option value="Wire">Wire</option>
+                                    <option value="ACH">ACH</option>
+                                    <option value="ACH Pull">ACH Pull</option>
+                                    <option value="Intra Bank Transfer">Intra Bank Transfer</option>
+                                    <option value="EFT">EFT</option>
+                                </select>
+                                <div id="request-type-help"
+                                     class="alert alert-info request-type-helper mt-1 py-1 px-2 small"
+                                     style="display:none;"></div>
+                            </div>
+
+                            <!-- Treasury Service Date -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="treasury_service_date">
+                                    Requested Treasury Service Date <span class="text-danger">*</span>
+                                </label>
+                                <input type="date" class="form-control"
+                                       id="treasury_service_date" name="treasury_service_date" required>
+                            </div>
+
+                            <!-- Previously Used Instructions -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold d-block">Banking Instructions Previously Used?</label>
+                                <div class="form-check mt-1">
+                                    <input class="form-check-input" type="checkbox"
+                                           id="instructions_previously_used"
+                                           name="instructions_previously_used" value="yes">
+                                    <label class="form-check-label" for="instructions_previously_used">
+                                        These instructions have been used previously
+                                    </label>
+                                </div>
+                                <div id="last-used-date-row" class="mt-2" style="display:none;">
+                                    <label class="form-label fw-semibold mb-1" for="last_used_date">Last Date Used <span class="text-danger">*</span></label>
+                                    <input type="date" class="form-control" id="last_used_date" name="last_used_date">
+                                </div>
+                                <div id="new-instructions-notice"
+                                     class="alert alert-warning py-2 px-3 mt-2 small">
+                                    <i class="fas fa-exclamation-triangle me-1"></i>
+                                    <strong>First-time or unverified instructions.</strong>
+                                    Verbal confirmation with a known contact is <strong>required</strong> before releasing this transaction.
+                                </div>
+                            </div>
+
+                            <!-- Urgent -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold d-block">
+                                    Is this request urgent? <span class="text-danger">*</span>
+                                </label>
+                                <div class="d-flex gap-4 mt-1">
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio"
+                                               name="urgent" id="urgent_yes" value="yes">
+                                        <label class="form-check-label fw-semibold text-danger" for="urgent_yes">
+                                            <i class="fas fa-exclamation-circle me-1"></i>Yes
+                                        </label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="radio"
+                                               name="urgent" id="urgent_no" value="no" checked>
+                                        <label class="form-check-label" for="urgent_no">No</label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Urgency Reason (shown when urgent = yes) -->
+                            <div class="col-12" id="urgency-reason-row" style="display:none;">
+                                <label class="form-label fw-semibold text-danger" for="urgency_reason">
+                                    <i class="fas fa-exclamation-circle me-1"></i>Urgency Reason
+                                    <span class="text-danger">*</span>
+                                </label>
+                                <textarea class="form-control border-danger" id="urgency_reason"
+                                          name="urgency_reason" rows="2"
+                                          placeholder="Describe why this request is urgent (e.g., vendor deadline, penalty avoidance)..."></textarea>
+                            </div>
+
+                            <!-- Prepared By -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="prepared_by">
+                                    Prepared By <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="prepared_by"
+                                       name="prepared_by" placeholder="Full name" required>
+                            </div>
+
+                            <!-- Prepared Date -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="prepared_date">
+                                    Prepared Date <span class="text-danger">*</span>
+                                </label>
+                                <input type="date" class="form-control bg-light text-muted" id="prepared_date"
+                                       name="prepared_date" readonly required style="cursor: default;">
+                            </div>
+
+                            <!-- Property / Department -->
+                            <div class="col-md-8">
+                                <label class="form-label fw-semibold" for="property_dept">
+                                    Property / Department <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="property_dept"
+                                       name="property_dept"
+                                       placeholder="e.g. Sunset Ridge Apartments" required>
+                            </div>
+
+                            <!-- Entity ID -->
+                            <div class="col-md-4">
+                                <label class="form-label fw-semibold" for="entity_id">Entity ID</label>
+                                <input type="text" class="form-control" id="entity_id"
+                                       name="entity_id" placeholder="e.g. SRA-001">
+                            </div>
+
+                            <!-- Approver -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="approver">
+                                    Approver <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="approver"
+                                       name="approver" placeholder="Approver's full name" required>
+                            </div>
+
+                            <!-- Controller -->
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="controller">
+                                    Controller <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="controller"
+                                       name="controller" placeholder="Controller's full name" required>
+                            </div>
+
+                        </div><!-- /row -->
+                    </div><!-- /accordion-body -->
+                </div>
+            </div>
+
+            <!-- ══ SECTION B: Verification Requirements ══════════════ -->
+            <div class="accordion-item form-section-card mb-3 shadow-sm">
+                <h2 class="accordion-header">
+                    <button class="accordion-button" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sectionB" aria-expanded="true">
+                        <span class="section-icon bg-info text-dark">B</span>
+                        Verification Requirements
+                    </button>
+                </h2>
+                <div id="sectionB" class="accordion-collapse collapse show">
+                    <div class="accordion-body pt-3">
+
+                        <div class="alert alert-info small mb-3 py-2">
+                            <i class="fas fa-shield-alt me-1"></i>
+                            <strong>Policy:</strong> If banking instructions have <strong>never been used before</strong>,
+                            verbal confirmation with a known contact is required before releasing any transaction.
+                        </div>
+
+                        <div class="row g-3">
+                            <!-- Verbal confirmation checkboxes -->
+                            <div class="col-12">
+                                <div class="form-check mb-2">
+                                    <input class="form-check-input" type="checkbox"
+                                           id="verbal_confirmed" name="verbal_confirmed">
+                                    <label class="form-check-label fw-semibold" for="verbal_confirmed">
+                                        Wire/ACH instructions verbally confirmed
+                                    </label>
+                                </div>
+                                <div class="ps-4 border-start ms-2">
+                                    <div class="form-check mb-1">
+                                        <input class="form-check-input" type="checkbox"
+                                               id="verbal_with_known" name="verbal_confirmed_with_known">
+                                        <label class="form-check-label small" for="verbal_with_known">
+                                            Verbally confirmed with a <strong>known contact</strong>
+                                        </label>
+                                    </div>
+                                    <div class="form-check mb-1">
+                                        <input class="form-check-input" type="checkbox"
+                                               id="verbal_with_requester" name="verbal_confirmed_with_requester">
+                                        <label class="form-check-label small" for="verbal_with_requester">
+                                            Verbally confirmed with the <strong>person requesting the transaction</strong>
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Verbal contact details -->
+                            <div class="col-md-6">
+                                <label class="form-label" for="verbal_contact_name">Verbal Confirmation Contact Name</label>
+                                <input type="text" class="form-control" id="verbal_contact_name"
+                                       name="verbal_contact_name" placeholder="Full name of contact confirmed with">
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="verbal_confirm_datetime">Verbal Confirmation Date / Time</label>
+                                <input type="text" class="form-control" id="verbal_confirm_datetime"
+                                       name="verbal_confirm_datetime"
+                                       placeholder="e.g. 2026-07-08 2:30 PM">
+                            </div>
+
+                            <!-- AVS Score + Validation Evidence -->
+                            <div class="col-md-4">
+                                <label class="form-label fw-semibold" for="avs_score">
+                                    AVS Score <span class="text-muted fw-normal small">(0–100)</span>
+                                </label>
+                                <div class="input-group">
+                                    <input type="number" class="form-control" id="avs_score"
+                                           name="avs_score" min="0" max="100" placeholder="e.g. 95">
+                                    <span class="input-group-text">/100</span>
+                                </div>
+                                <div class="form-text">Leave blank if score is unavailable.</div>
+                            </div>
+
+                            <div class="col-md-8">
+                                <label class="form-label fw-semibold" for="file_validation_evidence">
+                                    Validation Evidence <span class="text-danger">*</span>
+                                    <span class="text-muted fw-normal small ms-1">WF AVS screenshot or alternative verification</span>
+                                </label>
+                                <input type="file" class="form-control" id="file_validation_evidence"
+                                       name="file_validation_evidence"
+                                       accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
+                                <div class="form-text">
+                                    Attach the Wells Fargo AVS screenshot, or alternative verification if unavailable.
+                                </div>
+                            </div>
+
+                            <!-- Low / No-Score Warning -->
+                            <div class="col-12" id="avs-low-score-warning" style="display:none;">
+                                <div class="alert alert-warning small py-2 mb-0">
+                                    <i class="fas fa-exclamation-triangle me-1"></i>
+                                    <strong>Score below 90 or unavailable</strong> — alternative verification
+                                    documentation is required. Ensure the attached file includes supporting
+                                    evidence of account ownership or validation.
+                                </div>
+                            </div>
+
+                            <!-- Additional verification checkboxes -->
+                            <div class="col-12">
+                                <div class="card bg-light border-0 p-3">
+                                    <div class="form-check mb-2">
+                                        <input class="form-check-input" type="checkbox"
+                                               id="external_source" name="external_source">
+                                        <label class="form-check-label" for="external_source">
+                                            ACH/Wire instructions provided from an <strong>external source</strong>
+                                        </label>
+                                    </div>
+                                    <div class="form-check">
+                                        <input class="form-check-input" type="checkbox"
+                                               id="internal_doc_not_used" name="internal_doc_not_used">
+                                        <label class="form-check-label" for="internal_doc_not_used">
+                                            An internal document was <strong>not</strong> used as banking instruction backup
+                                        </label>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ SECTION C: Property / Originating Banking ═════════ -->
+            <div class="accordion-item form-section-card mb-3 shadow-sm">
+                <h2 class="accordion-header">
+                    <button class="accordion-button" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sectionC" aria-expanded="true">
+                        <span class="section-icon bg-success text-white">C</span>
+                        Property / Originating Banking Information
+                    </button>
+                </h2>
+                <div id="sectionC" class="accordion-collapse collapse show">
+                    <div class="accordion-body pt-3">
+                        <div class="alert alert-warning small py-2 mb-3">
+                            <i class="fas fa-lock me-1"></i>
+                            <strong>Demo only</strong> — Do not enter real account or routing numbers in this prototype.
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="orig_bank_name">
+                                    Originating Bank Name <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="orig_bank_name"
+                                       name="orig_bank_name" placeholder="e.g. Wells Fargo" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="orig_account_name">
+                                    Originating Account Name <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="orig_account_name"
+                                       name="orig_account_name" placeholder="Account name" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="orig_account_number">
+                                    Originating Account Number <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="orig_account_number"
+                                       name="orig_account_number" placeholder="Demo placeholder only"
+                                       autocomplete="off" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="orig_routing_number">
+                                    Originating Routing Number <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="orig_routing_number"
+                                       name="orig_routing_number" placeholder="Demo placeholder only"
+                                       autocomplete="off" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="orig_bank_contact">Bank Contact (if applicable)</label>
+                                <input type="text" class="form-control" id="orig_bank_contact"
+                                       name="orig_bank_contact"
+                                       placeholder="Contact name and phone number">
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label" for="notes_orig">Notes</label>
+                                <textarea class="form-control" id="notes_orig" name="notes_orig"
+                                          rows="2" placeholder="Additional notes for originating bank..."></textarea>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ SECTION D: Receiving Bank Information ══════════════ -->
+            <div class="accordion-item form-section-card mb-3 shadow-sm">
+                <h2 class="accordion-header">
+                    <button class="accordion-button" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sectionD" aria-expanded="true">
+                        <span class="section-icon bg-warning text-dark">D</span>
+                        Receiving Bank Information
+                    </button>
+                </h2>
+                <div id="sectionD" class="accordion-collapse collapse show">
+                    <div class="accordion-body pt-3">
+                        <div class="alert alert-warning small py-2 mb-3">
+                            <i class="fas fa-lock me-1"></i>
+                            <strong>Demo only</strong> — Do not enter real account or routing numbers in this prototype.
+                        </div>
+                        <div class="row g-3">
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="recv_payee_name">
+                                    Recipient / Payee Name <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_payee_name"
+                                       name="recv_payee_name" placeholder="Legal payee name" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="recv_bank_name">
+                                    Receiving Bank Name <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_bank_name"
+                                       name="recv_bank_name" placeholder="e.g. Chase Bank" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="recv_account_name">
+                                    Receiving Account Name <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_account_name"
+                                       name="recv_account_name" placeholder="Account name" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="recv_account_number">
+                                    Receiving Account Number <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_account_number"
+                                       name="recv_account_number" placeholder="Demo placeholder only"
+                                       autocomplete="off" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label fw-semibold" for="recv_routing_number">
+                                    Receiving Routing Number <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_routing_number"
+                                       name="recv_routing_number" placeholder="Demo placeholder only"
+                                       autocomplete="off" required>
+                            </div>
+                            <div class="col-md-6">
+                                <label class="form-label" for="recv_bank_address">
+                                    Receiving Bank / Beneficiary Address
+                                    <span id="wire-address-required" class="text-danger" style="display:none;"> *</span>
+                                </label>
+                                <input type="text" class="form-control" id="recv_bank_address"
+                                       name="recv_bank_address"
+                                       placeholder="Street, City, State ZIP">
+                                <div id="wire-address-note" class="form-text text-warning fw-semibold" style="display:none;">
+                                    <i class="fas fa-exclamation-circle me-1"></i>Required for Wire transactions.
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label" for="recv_contact_name">Recipient Contact Name</label>
+                                <input type="text" class="form-control" id="recv_contact_name"
+                                       name="recv_contact_name" placeholder="Contact name">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label" for="recv_contact_email">Recipient Contact Email</label>
+                                <input type="email" class="form-control" id="recv_contact_email"
+                                       name="recv_contact_email" placeholder="email@example.com">
+                            </div>
+                            <div class="col-md-4">
+                                <label class="form-label" for="recv_contact_phone">Recipient Contact Phone</label>
+                                <input type="tel" class="form-control" id="recv_contact_phone"
+                                       name="recv_contact_phone" placeholder="(555) 000-0000">
+                            </div>
+                            <div class="col-12">
+                                <label class="form-label" for="notes_recv">Notes</label>
+                                <textarea class="form-control" id="notes_recv" name="notes_recv"
+                                          rows="2" placeholder="Additional notes for receiving bank..."></textarea>
+                            </div>
+
+                            <!-- External ACH/Wire Instructions Upload -->
+                            <div class="col-12">
+                                <label class="form-label fw-semibold" for="file_wire_ach_instructions">
+                                    External ACH/Wire Instructions <span class="text-danger">*</span>
+                                </label>
+                                <input type="file" class="form-control" id="file_wire_ach_instructions"
+                                       name="file_wire_ach_instructions"
+                                       accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
+                                <div class="form-text">Attach the ACH or wire instructions provided by the payee or their bank.</div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ SECTION E: Transaction Details ════════════════════ -->
+            <div class="accordion-item form-section-card mb-3 shadow-sm">
+                <h2 class="accordion-header">
+                    <button class="accordion-button" type="button"
+                            data-bs-toggle="collapse" data-bs-target="#sectionE" aria-expanded="true">
+                        <span class="section-icon bg-danger text-white">E</span>
+                        Transaction Details
+                    </button>
+                </h2>
+                <div id="sectionE" class="accordion-collapse collapse show">
+                    <div class="accordion-body pt-3">
+                        <div class="row g-3">
+
+                            <!-- Amount -->
+                            <div class="col-md-5">
+                                <label class="form-label fw-semibold" for="amount">
+                                    Amount <span class="text-danger">*</span>
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text fw-semibold">$</span>
+                                    <input type="number" class="form-control form-control-lg" id="amount"
+                                           name="amount" placeholder="0.00" step="0.01" min="0" required>
+                                </div>
+                            </div>
+
+                            <!-- Currency -->
+                            <div class="col-md-3">
+                                <label class="form-label fw-semibold" for="currency">Currency</label>
+                                <select class="form-select form-select-lg" id="currency" name="currency">
+                                    <option value="USD" selected>USD</option>
+                                    <option value="CAD">CAD</option>
+                                    <option value="EUR">EUR</option>
+                                    <option value="GBP">GBP</option>
+                                </select>
+                            </div>
+
+                            <!-- Dynamic Approval Tier Card (inline) -->
+                            <div class="col-12">
+                                <div id="approval-tier-card" class="card tier-card-sam" style="display:none;">
+                                    <div class="card-body py-2 px-3 d-flex align-items-center gap-3">
+                                        <i id="tier-icon" class="fas fa-user fa-lg text-success"></i>
+                                        <div>
+                                            <span class="section-label">Required Release Tier</span>
+                                            <div>
+                                                <span id="tier-badge" class="badge tier-badge-sam fs-6 px-3 py-2">
+                                                    <span id="tier-label">—</span>
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- CFO Warning (> $1M) -->
+                            <div class="col-12">
+                                <div id="cfo-warning" class="alert cfo-warning small" style="display:none;">
+                                    <i class="fas fa-exclamation-circle me-1"></i>
+                                    <strong>HIGH-VALUE TRANSACTION — CFO Approval Required.</strong>
+                                    Transactions greater than $1,000,000 require <strong>additional verbal and written CFO approval</strong>
+                                    before release. Executive/officer approval documentation must be attached.
+                                </div>
+                            </div>
+
+                            <!-- VP Release Notice (> $500K) -->
+                            <div class="col-12">
+                                <div id="vp-release-notice" class="alert alert-warning small" style="display:none;">
+                                    <i class="fas fa-user-tie me-1"></i>
+                                    <strong>VP Release Required.</strong>
+                                    Transactions greater than $500,000 must be released by a Vice President.
+                                </div>
+                            </div>
+
+                            <!-- Payment Purpose + Support -->
+                            <div class="col-12">
+                                <label class="form-label fw-semibold" for="payment_purpose">
+                                    Payment Purpose / Description <span class="text-danger">*</span>
+                                </label>
+                                <textarea class="form-control" id="payment_purpose"
+                                          name="payment_purpose" rows="2"
+                                          placeholder="Describe the purpose of this payment..." required></textarea>
+                            </div>
+
+                            <div class="col-12">
+                                <label class="form-label fw-semibold" for="file_payment_support">
+                                    Payment Support <span class="text-danger">*</span>
+                                    <span class="text-muted fw-normal small ms-1">Invoice, vendor email, statement, or other documentation</span>
+                                </label>
+                                <input type="file" class="form-control" id="file_payment_support"
+                                       name="file_payment_support"
+                                       accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.msg,.eml">
+                                <div class="form-text">Accepted: invoices, vendor emails, calculations, statements, or any documentation supporting the payment amount and purpose.</div>
+                            </div>
+
+                            <!-- Authorizations -->
+                            <div class="col-12">
+                                <div class="card bg-light border-0">
+                                    <div class="card-body">
+                                        <h6 class="text-muted mb-3 small text-uppercase fw-bold ls-1">
+                                            <i class="fas fa-clipboard-check me-1"></i> Required Authorizations
+                                        </h6>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox"
+                                                   id="backup_amount" name="backup_amount">
+                                            <label class="form-check-label" for="backup_amount">
+                                                Payment support documentation provided
+                                            </label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox"
+                                                   id="auth_to_move" name="auth_to_move">
+                                            <label class="form-check-label" for="auth_to_move">
+                                                Authorization to move funds provided
+                                            </label>
+                                        </div>
+                                        <div class="form-check mb-2">
+                                            <input class="form-check-input" type="checkbox"
+                                                   id="exec_approval_required" name="exec_approval_required">
+                                            <label class="form-check-label" for="exec_approval_required">
+                                                Executive/Officer approval required
+                                                <span id="exec-approval-notice"
+                                                      class="badge bg-danger ms-1" style="display:none;">
+                                                    Required for &gt;$1M
+                                                </span>
+                                            </label>
+                                        </div>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox"
+                                                   id="exec_approval_attached" name="exec_approval_attached">
+                                            <label class="form-check-label" for="exec_approval_attached">
+                                                Executive/Officer approval attached
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div><!-- /row -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- ══ SUBMIT ══════════════════════════════════════════════ -->
+            <div class="card border-primary shadow-sm mt-2">
+                <div class="card-body">
+                    <div class="d-flex flex-wrap gap-3 align-items-center">
+                        <button type="submit" class="btn btn-primary btn-lg px-5 fw-semibold">
+                            <i class="fas fa-paper-plane me-2"></i>Submit Treasury Request
+                        </button>
+                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-lg">
+                            <i class="fas fa-times me-1"></i>Cancel
+                        </a>
+                        <div class="ms-auto text-muted small">
+                            <i class="fas fa-flask me-1"></i>
+                            Submission saves to session memory only (demo).
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </form>
+    </div><!-- /col-xl-8 -->
+
+    <!-- ═══════════════════════════════════════════════════════
+         STICKY SIDEBAR (xl+ screens only)
+    ════════════════════════════════════════════════════════ -->
+    <div class="col-xl-4 d-none d-xl-block">
+        <div class="sticky-sidebar">
+
+            <!-- Approval Tier Preview Card -->
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-layer-group text-primary"></i>
+                    <strong class="small text-uppercase">Approval Tier Preview</strong>
+                </div>
+                <div class="card-body">
+                    <div id="sidebar-no-amount" class="text-center text-muted py-2 small">
+                        <i class="fas fa-arrow-left me-1"></i>
+                        Enter an amount in Section E to see the required approval tier.
+                    </div>
+                    <div id="sidebar-tier-display" style="display:none;">
+                        <span class="section-label">Entered Amount</span>
+                        <div class="h4 mb-3 fw-bold" id="sidebar-amount-display">—</div>
+                        <span class="section-label">Required Release Tier</span>
+                        <div class="mt-1 mb-3">
+                            <span id="sidebar-tier-badge" class="badge tier-badge-sam fs-6 px-3 py-2 d-block">—</span>
+                        </div>
+                        <div id="sidebar-cfo-warning" class="alert alert-danger small py-2" style="display:none;">
+                            <i class="fas fa-exclamation-triangle me-1"></i>
+                            <strong>CFO approval required.</strong><br>
+                            Verbal <em>and</em> written approval needed.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Policy Quick Reference -->
+            <div class="card shadow-sm mb-3">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-book text-secondary"></i>
+                    <strong class="small text-uppercase">Policy Quick Reference</strong>
+                </div>
+                <div class="card-body p-0">
+                    <ul class="list-group list-group-flush small">
+                        <li class="list-group-item d-flex align-items-start gap-2">
+                            <span class="badge tier-badge-sam mt-1">≤ $250K</span>
+                            <span>Senior Accounting Mgr or Asst. Controller</span>
+                        </li>
+                        <li class="list-group-item d-flex align-items-start gap-2">
+                            <span class="badge tier-badge-controller mt-1">$250K–$500K</span>
+                            <span>Controller</span>
+                        </li>
+                        <li class="list-group-item d-flex align-items-start gap-2">
+                            <span class="badge tier-badge-vp mt-1">$500K–$1M</span>
+                            <span>Vice President</span>
+                        </li>
+                        <li class="list-group-item d-flex align-items-start gap-2">
+                            <span class="badge tier-badge-cfo mt-1">&gt; $1M</span>
+                            <span>VP + <strong>CFO verbal &amp; written</strong></span>
+                        </li>
+                        <li class="list-group-item small text-muted">
+                            <i class="fas fa-exclamation-triangle text-warning me-1"></i>
+                            Email approval is <strong>not sufficient</strong>.
+                        </li>
+                        <li class="list-group-item small text-muted">
+                            <i class="fas fa-user-check text-info me-1"></i>
+                            Controller must sign; if absent, VP approval required.
+                        </li>
+                        <li class="list-group-item small text-muted">
+                            <i class="fas fa-phone text-success me-1"></i>
+                            New instructions → verbal confirmation with known contact required.
+                        </li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Request Type Guide -->
+            <div class="card shadow-sm">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-exchange-alt text-secondary"></i>
+                    <strong class="small text-uppercase">Request Type Guide</strong>
+                </div>
+                <div class="card-body p-0">
+                    <ul class="list-group list-group-flush small">
+                        <li class="list-group-item"><strong>Wire:</strong> Same-day if released before bank cutoff.</li>
+                        <li class="list-group-item"><strong>ACH:</strong> ~2-day if released before bank cutoff.</li>
+                        <li class="list-group-item"><strong>ACH Pull:</strong> Receiving bank initiates. Use only if ACH/Wire unavailable at originating bank.</li>
+                        <li class="list-group-item"><strong>Intra Bank:</strong> Internal transfers. SD True Ups: accountants may move directly.</li>
+                        <li class="list-group-item"><strong>EFT:</strong> Canada-specific equivalent of ACH.</li>
+                    </ul>
+                </div>
+            </div>
+
+        </div><!-- /sticky-sidebar -->
+    </div><!-- /col-xl-4 -->
+
+</div><!-- /row -->
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // Always default Prepared Date to today
+    document.getElementById('prepared_date').value = new Date().toLocaleDateString('en-CA');
+
+    // ── Previously Used Instructions → show/hide date picker ────
+    function onInstructionsPreviouslyUsedChange() {
+        const cb      = document.getElementById('instructions_previously_used');
+        const dateRow = document.getElementById('last-used-date-row');
+        const notice  = document.getElementById('new-instructions-notice');
+        const dateIn  = document.getElementById('last_used_date');
+        if (!cb) return;
+        const checked = cb.checked;
+        if (dateRow) dateRow.style.display = checked ? 'block' : 'none';
+        if (notice)  notice.style.display  = checked ? 'none'  : 'block';
+        if (dateIn)  dateIn.required       = checked;
+        if (!checked && dateIn) dateIn.value = '';
+    }
+
+    // ── AVS Score → Low-score warning ────────────────────────────
+    function onAvsScoreChange() {
+        const scoreInput = document.getElementById('avs_score');
+        const warning    = document.getElementById('avs-low-score-warning');
+        if (!scoreInput || !warning) return;
+        const val   = scoreInput.value.trim();
+        const score = val === '' ? null : parseInt(val, 10);
+        warning.style.display = (score === null || score < 90) ? 'block' : 'none';
+    }
+
+    // ── Wire type → Beneficiary address required ──────────────────
+    function onRequestTypeWireCheck() {
+        const reqType   = document.getElementById('request_type');
+        const addrField = document.getElementById('recv_bank_address');
+        const addrStar  = document.getElementById('wire-address-required');
+        const addrNote  = document.getElementById('wire-address-note');
+        if (!reqType) return;
+        const isWire = reqType.value === 'Wire';
+        if (addrField) addrField.required     = isWire;
+        if (addrStar)  addrStar.style.display = isWire ? 'inline' : 'none';
+        if (addrNote)  addrNote.style.display = isWire ? 'block'  : 'none';
+    }
+
+    // ── Pre-submit attachment + Wire validation ───────────────────
+    function validateAttachments(e) {
+        const reqType = document.getElementById('request_type')?.value || '';
+        const errors  = [];
+
+        // Section B — Validation Evidence
+        const valEv = document.getElementById('file_validation_evidence');
+        if (valEv && !valEv.files.length)
+            errors.push({ msg: '<strong>Validation Evidence</strong> — attach the WF AVS screenshot or alternative verification.', section: 'sectionB' });
+
+        // Section D — External ACH/Wire Instructions
+        const wireInstr = document.getElementById('file_wire_ach_instructions');
+        if (wireInstr && !wireInstr.files.length)
+            errors.push({ msg: '<strong>External ACH/Wire Instructions</strong> must be attached.', section: 'sectionD' });
+
+        // Section D — Beneficiary address required for Wire
+        if (reqType === 'Wire') {
+            const addr = document.getElementById('recv_bank_address');
+            if (addr && !addr.value.trim())
+                errors.push({ msg: '<strong>Receiving Bank / Beneficiary Address</strong> is required for Wire transactions.', section: 'sectionD' });
+        }
+
+        // Section E — Payment Support
+        const paySup = document.getElementById('file_payment_support');
+        if (paySup && !paySup.files.length)
+            errors.push({ msg: '<strong>Payment Support</strong> documentation must be attached.', section: 'sectionE' });
+
+        if (!errors.length) return true;
+        e.preventDefault();
+
+        const old = document.getElementById('attach-errors');
+        if (old) old.remove();
+
+        const banner = document.createElement('div');
+        banner.id        = 'attach-errors';
+        banner.className = 'alert alert-danger mb-3';
+        banner.innerHTML =
+            '<strong><i class="fas fa-exclamation-circle me-1"></i>Please fix the following before submitting:</strong>' +
+            '<ul class="mb-0 mt-2">' +
+            errors.map(err =>
+                `<li><a class="alert-link" href="#${err.section}" onclick="expandAndScroll('${err.section}')">${err.msg}</a></li>`
+            ).join('') + '</ul>';
+
+        const form = document.getElementById('intake-form');
+        form.prepend(banner);
+        banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+        errors.forEach(err => {
+            const item = document.getElementById(err.section)?.closest('.accordion-item');
+            if (item) {
+                item.classList.add('border', 'border-danger');
+                setTimeout(() => item.classList.remove('border', 'border-danger'), 4000);
+            }
+        });
+    }
+
+    function expandAndScroll(sectionId) {
+        const el = document.getElementById(sectionId);
+        if (!el) return;
+        if (!el.classList.contains('show'))
+            bootstrap.Collapse.getOrCreateInstance(el).show();
+        setTimeout(() => el.scrollIntoView({ behavior: 'smooth', block: 'start' }), 150);
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+        // AVS score wiring
+        const avsInput = document.getElementById('avs_score');
+        if (avsInput) {
+            avsInput.addEventListener('input', onAvsScoreChange);
+            onAvsScoreChange();
+        }
+
+        // Previously used instructions checkbox
+        const prevUsedCb = document.getElementById('instructions_previously_used');
+        if (prevUsedCb) {
+            prevUsedCb.addEventListener('change', onInstructionsPreviouslyUsedChange);
+            onInstructionsPreviouslyUsedChange();
+        }
+
+        // Wire type → address required
+        const reqTypeEl = document.getElementById('request_type');
+        if (reqTypeEl) {
+            reqTypeEl.addEventListener('change', onRequestTypeWireCheck);
+            onRequestTypeWireCheck();
+        }
+
+        // Pre-submit validation
+        const form = document.getElementById('intake-form');
+        if (form) form.addEventListener('submit', validateAttachments);
+    });
+</script>
+{% endblock %}

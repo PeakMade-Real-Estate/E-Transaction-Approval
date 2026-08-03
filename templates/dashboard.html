@@ -1,0 +1,353 @@
+{% extends "base.html" %}
+{% block title %}Approver Dashboard — E-Transaction Approval Dashboard{% endblock %}
+
+{% block content %}
+
+<!-- Page Header -->
+<div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
+    <div>
+        <h2 class="fw-bold mb-1">
+            <i class="fas fa-table-columns me-2 text-primary"></i>Approver Dashboard
+        </h2>
+        <p class="text-muted mb-0 small">
+            Review and act on treasury transaction requests.
+            &ensp;<span class="badge bg-warning text-dark"><i class="fas fa-flask me-1"></i>Mock Data Only</span>
+        </p>
+    </div>
+    <a href="{{ url_for('intake') }}" class="btn btn-primary">
+        <i class="fas fa-plus me-1"></i> New Request
+    </a>
+</div>
+
+<!-- ── Summary Stat Cards ─────────────────────────────────────── -->
+<div class="row g-3 mb-4">
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#1e3a5f;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.total }}</div>
+                        <div class="stat-label">Total</div>
+                    </div>
+                    <i class="fas fa-folder-open stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending Controller Approval') }}" class="text-decoration-none">
+            <div class="card stat-card text-dark shadow-sm h-100" style="background-color:#ffc107;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_controller }}</div>
+                        <div class="stat-label">Pending Controller</div>
+                    </div>
+                    <i class="fas fa-user-check stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending Treasury Review') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#0d6efd;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_treasury }}</div>
+                        <div class="stat-label">Pending Treasury</div>
+                    </div>
+                    <i class="fas fa-search-dollar stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending Release') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#6f42c1;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_release }}</div>
+                        <div class="stat-label">Pending Release</div>
+                    </div>
+                    <i class="fas fa-paper-plane stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Completed') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#198754;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.completed }}</div>
+                        <div class="stat-label">Completed / Released</div>
+                    </div>
+                    <i class="fas fa-check-circle stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+
+    <div class="col-6 col-md-4 col-xl-2">
+        <div class="row g-2 h-100">
+            <div class="col-6">
+                <a href="{{ url_for('dashboard', urgent_only='1') }}" class="text-decoration-none">
+                    <div class="card stat-card text-white shadow-sm h-100" style="background-color:#dc3545;">
+                        <div class="card-body py-2 px-3">
+                            <div class="stat-number" style="font-size:1.5rem;">{{ stats.urgent }}</div>
+                            <div class="stat-label">Urgent</div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            <div class="col-6">
+                <a href="{{ url_for('dashboard', over_1m_only='1') }}" class="text-decoration-none">
+                    <div class="card stat-card text-white shadow-sm h-100" style="background-color:#fd7e14;">
+                        <div class="card-body py-2 px-3">
+                            <div class="stat-number" style="font-size:1.5rem;">{{ stats.over_1m }}</div>
+                            <div class="stat-label">&gt; $1M</div>
+                        </div>
+                    </div>
+                </a>
+            </div>
+        </div>
+    </div>
+
+</div>
+
+<!-- ── Filters ─────────────────────────────────────────────────── -->
+<div class="card shadow-sm mb-4">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 fw-bold text-muted text-uppercase small">
+            <i class="fas fa-filter me-1"></i> Filters
+        </h6>
+        {% if filters.status or filters.request_type or filters.property or filters.approver
+              or filters.urgent_only or filters.over_1m_only
+              or filters.amount_min or filters.amount_max %}
+        <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-danger">
+            <i class="fas fa-times me-1"></i>Clear Filters
+        </a>
+        {% endif %}
+    </div>
+    <div class="card-body pb-2">
+        <form method="GET" action="{{ url_for('dashboard') }}" id="filter-form">
+            <div class="row g-2 align-items-end">
+                <!-- Status -->
+                <div class="col-sm-6 col-md-4 col-lg-2">
+                    <label class="form-label small mb-1">Status</label>
+                    <select class="form-select form-select-sm" name="status">
+                        <option value="">All Statuses</option>
+                        {% for s in all_statuses %}
+                        <option value="{{ s }}" {% if filters.status == s %}selected{% endif %}>{{ s }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <!-- Request Type -->
+                <div class="col-sm-6 col-md-4 col-lg-2">
+                    <label class="form-label small mb-1">Request Type</label>
+                    <select class="form-select form-select-sm" name="request_type">
+                        <option value="">All Types</option>
+                        {% for t in all_types %}
+                        <option value="{{ t }}" {% if filters.request_type == t %}selected{% endif %}>{{ t }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <!-- Property -->
+                <div class="col-sm-6 col-md-4 col-lg-2">
+                    <label class="form-label small mb-1">Property / Dept</label>
+                    <input type="text" class="form-control form-control-sm" name="property"
+                           value="{{ filters.property }}" placeholder="Search...">
+                </div>
+                <!-- Approver -->
+                <div class="col-sm-6 col-md-4 col-lg-2">
+                    <label class="form-label small mb-1">Assigned Approver</label>
+                    <select class="form-select form-select-sm" name="approver">
+                        <option value="">All Approvers</option>
+                        {% for a in all_approvers %}
+                        <option value="{{ a }}" {% if filters.approver == a %}selected{% endif %}>{{ a }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <!-- Amount Range -->
+                <div class="col-sm-3 col-md-2 col-lg-1">
+                    <label class="form-label small mb-1">Min $</label>
+                    <input type="number" class="form-control form-control-sm" name="amount_min"
+                           value="{{ filters.amount_min }}" placeholder="0" min="0">
+                </div>
+                <div class="col-sm-3 col-md-2 col-lg-1">
+                    <label class="form-label small mb-1">Max $</label>
+                    <input type="number" class="form-control form-control-sm" name="amount_max"
+                           value="{{ filters.amount_max }}" placeholder="∞" min="0">
+                </div>
+                <!-- Checkboxes -->
+                <div class="col-auto">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" id="chk_urgent"
+                               name="urgent_only" value="1"
+                               {% if filters.urgent_only %}checked{% endif %}>
+                        <label class="form-check-label small" for="chk_urgent">
+                            <span class="badge bg-danger">Urgent Only</span>
+                        </label>
+                    </div>
+                </div>
+                <div class="col-auto">
+                    <div class="form-check mt-4">
+                        <input class="form-check-input" type="checkbox" id="chk_1m"
+                               name="over_1m_only" value="1"
+                               {% if filters.over_1m_only %}checked{% endif %}>
+                        <label class="form-check-label small" for="chk_1m">
+                            <span class="badge badge-orange">&gt; $1M Only</span>
+                        </label>
+                    </div>
+                </div>
+                <!-- Apply button -->
+                <div class="col-auto">
+                    <button type="submit" class="btn btn-primary btn-sm mt-4">
+                        <i class="fas fa-search me-1"></i>Apply
+                    </button>
+                </div>
+            </div>
+        </form>
+    </div>
+</div>
+
+<!-- ── Request Table ───────────────────────────────────────────── -->
+<div class="card shadow-sm">
+    <div class="card-header bg-light d-flex justify-content-between align-items-center">
+        <h6 class="mb-0 fw-bold text-muted text-uppercase small">
+            <i class="fas fa-list me-1"></i>
+            Requests
+            <span class="badge bg-secondary ms-1">{{ requests | length }}</span>
+        </h6>
+        {% if requests | length != stats.total %}
+        <small class="text-muted">Showing {{ requests | length }} of {{ stats.total }} total</small>
+        {% endif %}
+    </div>
+
+    {% if not requests %}
+    <div class="card-body text-center py-5 text-muted">
+        <i class="fas fa-search fa-3x mb-3 opacity-25"></i>
+        <div>No requests match your current filters.</div>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-sm btn-outline-secondary mt-2">Clear Filters</a>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+        <table class="table table-hover align-middle mb-0 small">
+            <thead class="table-light">
+                <tr>
+                    <th class="ps-3">Request ID</th>
+                    <th>Date</th>
+                    <th>Type</th>
+                    <th>Property / Dept</th>
+                    <th class="d-none d-lg-table-cell">Prepared By</th>
+                    <th class="text-end">Amount</th>
+                    <th>Status</th>
+                    <th class="text-center">Flags</th>
+                    <th class="d-none d-xl-table-cell">Assigned Approver</th>
+                    <th class="d-none d-xl-table-cell text-center">Days Pending</th>
+                    <th class="text-center">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for req in requests %}
+                <tr class="{% if req.urgent %}row-urgent{% endif %} {% if req.amount > 1000000 %}row-over-1m{% endif %}">
+
+                    <!-- Request ID -->
+                    <td class="ps-3 fw-semibold">
+                        <a href="{{ url_for('request_detail', request_id=req.request_id) }}"
+                           class="text-decoration-none">
+                            {{ req.request_id }}
+                        </a>
+                    </td>
+
+                    <!-- Date -->
+                    <td class="text-nowrap">{{ req.submitted_date }}</td>
+
+                    <!-- Type -->
+                    <td>
+                        <span class="badge bg-light text-dark border">{{ req.request_type }}</span>
+                    </td>
+
+                    <!-- Property -->
+                    <td>
+                        <div class="fw-semibold">{{ req.property_dept }}</div>
+                        {% if req.property_code %}
+                        <div class="text-muted" style="font-size:0.75rem;">{{ req.property_code }}</div>
+                        {% endif %}
+                    </td>
+
+                    <!-- Prepared By (hidden on sm) -->
+                    <td class="d-none d-lg-table-cell">{{ req.prepared_by }}</td>
+
+                    <!-- Amount -->
+                    <td class="text-end text-nowrap fw-semibold">
+                        {{ req.amount | currency }}
+                        {% if req.currency != 'USD' %}
+                        <div class="text-muted" style="font-size:0.75rem;">{{ req.currency }}</div>
+                        {% endif %}
+                    </td>
+
+                    <!-- Status -->
+                    <td>
+                        <span class="badge {{ req.status | status_badge_class }} text-wrap">
+                            {{ req.status }}
+                        </span>
+                    </td>
+
+                    <!-- Flags -->
+                    <td class="text-center text-nowrap">
+                        {% if req.urgent %}
+                        <span class="badge bg-danger urgent-pulse" title="Urgent">
+                            <i class="fas fa-bolt"></i> Urgent
+                        </span>
+                        {% endif %}
+                        {% if req.amount > 1000000 %}
+                        <span class="badge badge-orange" title="Over $1M — CFO approval required">
+                            <i class="fas fa-star"></i> &gt;$1M
+                        </span>
+                        {% endif %}
+                    </td>
+
+                    <!-- Assigned Approver (xl) -->
+                    <td class="d-none d-xl-table-cell">{{ req.assigned_approver or '—' }}</td>
+
+                    <!-- Days Pending (xl) -->
+                    <td class="d-none d-xl-table-cell text-center">
+                        {% if req.days_pending > 0 %}
+                        <span class="badge {% if req.days_pending > 5 %}bg-danger{% elif req.days_pending > 2 %}bg-warning text-dark{% else %}bg-secondary{% endif %}">
+                            {{ req.days_pending }}d
+                        </span>
+                        {% else %}
+                        <span class="text-muted">—</span>
+                        {% endif %}
+                    </td>
+
+                    <!-- Actions -->
+                    <td class="text-center text-nowrap">
+                        <a href="{{ url_for('request_detail', request_id=req.request_id) }}"
+                           class="btn btn-sm btn-outline-primary"
+                           title="View Details">
+                            <i class="fas fa-eye"></i>
+                        </a>
+                    </td>
+
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</div>
+
+<!-- Legend -->
+<div class="d-flex gap-3 flex-wrap mt-3 small text-muted">
+    <span><span class="badge bg-warning text-dark me-1">&nbsp;</span> Row highlighted = Urgent</span>
+    <span><span class="badge bg-danger me-1">&nbsp;</span> Row highlighted = Over $1M (CFO required)</span>
+    <span>Click Request ID or <i class="fas fa-eye"></i> to view full details and take action</span>
+</div>
+
+{% endblock %}

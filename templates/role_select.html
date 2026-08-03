@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Select Your Role — E-Transaction Approval Dashboard{% endblock %}
+
+{% block head %}
+<style>
+    .role-card {
+        transition: transform 0.15s ease, box-shadow 0.15s ease;
+        cursor: pointer;
+        border: 2px solid transparent !important;
+        text-decoration: none;
+        background: #fff;
+    }
+    .role-card:hover {
+        transform: translateY(-4px);
+        box-shadow: 0 .5rem 1.5rem rgba(0,0,0,.15) !important;
+    }
+    .role-card-submitter:hover  { border-color: #0d6efd !important; }
+    .role-card-approver:hover   { border-color: #198754 !important; }
+    .role-card-treasury:hover   { border-color: #6f42c1 !important; }
+    .role-icon-circle { width: 68px; height: 68px; border-radius: 50%; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center mt-4 mb-3">
+    <div class="col-lg-6 text-center">
+        <i class="fas fa-user-tag text-navy mb-3" style="font-size:2.5rem;"></i>
+        <h2 class="fw-bold mb-2">Select Your Testing Role</h2>
+        <p class="text-muted mb-0">
+            Choose a role to continue. This simulates future Azure AD role assignment &mdash;
+            no credentials required in this prototype.
+        </p>
+    </div>
+</div>
+
+<div class="row justify-content-center g-4 pb-5">
+
+    <!-- ── Submitter ──────────────────────────── -->
+    <div class="col-xl-3 col-md-6 col-sm-10">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="submitter">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-submitter text-center p-0">
+                <div class="card-body p-4">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#e8f0fe;">
+                        <i class="fas fa-file-pen fa-2x" style="color:#0d6efd;"></i>
+                    </div>
+                    <h5 class="fw-bold mb-2">Submitter</h5>
+                    <p class="text-muted small mb-0">
+                        Submit new wire, ACH, or EFT payment requests and track their status through the approval workflow.
+                    </p>
+                </div>
+                <div class="card-footer border-0 bg-primary text-white py-2 fw-semibold small rounded-bottom">
+                    Continue as Submitter &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+
+    <!-- ── Approver ───────────────────────────── -->
+    <div class="col-xl-3 col-md-6 col-sm-10">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="approver">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-approver text-center p-0">
+                <div class="card-body p-4">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#e8f8f0;">
+                        <i class="fas fa-stamp fa-2x" style="color:#198754;"></i>
+                    </div>
+                    <h5 class="fw-bold mb-2">Approver</h5>
+                    <p class="text-muted small mb-0">
+                        Review and approve or reject payment requests as a Controller, VP, or CFO-level approver.
+                    </p>
+                </div>
+                <div class="card-footer border-0 bg-success text-white py-2 fw-semibold small rounded-bottom">
+                    Continue as Approver &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+
+    <!-- ── Treasury ───────────────────────────── -->
+    <div class="col-xl-3 col-md-6 col-sm-10">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="treasury">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-treasury text-center p-0">
+                <div class="card-body p-4">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#f0edf8;">
+                        <i class="fas fa-vault fa-2x" style="color:#6f42c1;"></i>
+                    </div>
+                    <h5 class="fw-bold mb-2">Treasury</h5>
+                    <p class="text-muted small mb-0">
+                        Process treasury reviews, authorize releases, and mark transactions complete.
+                    </p>
+                </div>
+                <div class="card-footer border-0 text-white py-2 fw-semibold small rounded-bottom"
+                     style="background:#6f42c1;">
+                    Continue as Treasury &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+
+</div>
+
+<!-- Prototype note -->
+<div class="row justify-content-center pb-4">
+    <div class="col-lg-6">
+        <div class="alert alert-warning py-2 text-center small mb-0">
+            <i class="fas fa-flask me-1"></i>
+            <strong>Prototype only.</strong>
+            Role selection replaces real authentication. All three roles can see all data in this demo.
+            Real access controls will be enforced via Azure AD. &nbsp;[<code>AUTH</code>]&nbsp;[<code>RBAC</code>]
+        </div>
+    </div>
+</div>
+{% endblock %}

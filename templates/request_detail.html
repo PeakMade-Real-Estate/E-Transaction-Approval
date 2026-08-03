@@ -1,0 +1,631 @@
+{% extends "base.html" %}
+{% block title %}{{ record.request_id }} — E-Transaction Approval Dashboard{% endblock %}
+
+{% block content %}
+
+<!-- Page Header -->
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
+    <div>
+        <h2 class="fw-bold mb-1">
+            <i class="fas fa-file-invoice-dollar me-2 text-primary"></i>
+            {{ record.request_id }}
+        </h2>
+        <div class="d-flex flex-wrap gap-2 align-items-center">
+            <span class="badge {{ record.status | status_badge_class }} fs-6 px-3 py-1">
+                {{ record.status }}
+            </span>
+            {% if record.urgent %}
+            <span class="badge bg-danger px-2 py-1">
+                <i class="fas fa-bolt me-1"></i>URGENT
+            </span>
+            {% endif %}
+            {% if record.amount > 1000000 %}
+            <span class="badge badge-orange px-2 py-1">
+                <i class="fas fa-star me-1"></i>HIGH VALUE &gt;$1M
+            </span>
+            {% endif %}
+            <small class="text-muted">Submitted {{ record.submitted_date }}</small>
+        </div>
+    </div>
+    <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="fas fa-arrow-left me-1"></i> Dashboard
+    </a>
+</div>
+
+<!-- High-value banner -->
+{% if record.amount > 1000000 %}
+<div class="high-value-banner mb-4">
+    <i class="fas fa-exclamation-triangle me-2"></i>
+    <strong>HIGH-VALUE TRANSACTION:</strong>
+    This transaction exceeds $1,000,000 and requires additional verbal and written CFO approval before release.
+    Executive/Officer approval documentation must be attached.
+</div>
+{% endif %}
+
+<!-- Urgency reason -->
+{% if record.urgent and record.urgency_reason %}
+<div class="alert alert-danger d-flex align-items-start gap-3 mb-4">
+    <i class="fas fa-bolt fa-lg mt-1 flex-shrink-0"></i>
+    <div>
+        <strong>Urgency Reason:</strong> {{ record.urgency_reason }}
+    </div>
+</div>
+{% endif %}
+
+<div class="row g-4">
+
+    <!-- ═══ LEFT COLUMN: Details ══════════════════════════════════ -->
+    <div class="col-xl-8">
+
+        <!-- ── A: Request Overview ──────────────────────────── -->
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-clipboard me-2"></i>A — Request Overview</h6>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 small">
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Request Type</span>
+                        <div class="fw-semibold">
+                            <span class="badge bg-light text-dark border fs-6">{{ record.request_type }}</span>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Property / Department</span>
+                        <div class="fw-semibold">{{ record.property_dept or '—' }}</div>
+                        {% if record.property_code %}
+                        <div class="text-muted">Code: {{ record.property_code }}</div>
+                        {% endif %}
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Prepared By</span>
+                        <div>{{ record.prepared_by or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Prepared Date</span>
+                        <div>{{ record.prepared_date or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Approver</span>
+                        <div>{{ record.get('approver') or record.get('controller_approver') or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Controller</span>
+                        <div>{{ record.get('controller') or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Treasury Service Date</span>
+                        <div>{{ record.treasury_service_date or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Last Instructions Used</span>
+                        <div>
+                            {% if record.last_used_date %}
+                            {{ record.last_used_date }}
+                            {% else %}
+                            <span class="text-warning fw-semibold">
+                                <i class="fas fa-exclamation-triangle me-1"></i>Never used (new instructions)
+                            </span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Urgent</span>
+                        <div>
+                            {% if record.urgent %}
+                            <span class="badge bg-danger"><i class="fas fa-bolt me-1"></i>Yes</span>
+                            {% else %}
+                            <span class="text-muted">No</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── B: Verification Requirements ─────────────────── -->
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-shield-alt me-2"></i>B — Verification Requirements</h6>
+            </div>
+            <div class="card-body small">
+                <div class="row g-2">
+                    {% macro check_item(value, label) %}
+                    <div class="col-12">
+                        <div class="d-flex align-items-center gap-2">
+                            {% if value %}
+                            <i class="fas fa-check-circle checklist-complete fa-sm"></i>
+                            {% else %}
+                            <i class="fas fa-times-circle checklist-missing fa-sm"></i>
+                            {% endif %}
+                            <span class="{% if not value %}text-muted{% endif %}">{{ label }}</span>
+                        </div>
+                    </div>
+                    {% endmacro %}
+
+                    {{ check_item(record.verbal_confirmed,      'Wire/ACH instructions verbally confirmed') }}
+                    {{ check_item(record.external_source,       'Instructions from external source') }}
+                    {{ check_item(record.internal_doc_not_used, 'Internal document NOT used as backup') }}
+
+                    {% if record.verbal_confirmed %}
+                    <div class="col-12 mt-2">
+                        <div class="card bg-light border-0 p-2 small">
+                            <div class="row g-2">
+                                {% if record.verbal_confirmed_with %}
+                                <div class="col-sm-4">
+                                    <span class="section-label">Confirmed With</span>
+                                    <div>{{ record.verbal_confirmed_with }}</div>
+                                </div>
+                                {% endif %}
+                                {% if record.verbal_contact_name %}
+                                <div class="col-sm-4">
+                                    <span class="section-label">Contact Name</span>
+                                    <div>{{ record.verbal_contact_name }}</div>
+                                </div>
+                                {% endif %}
+                                {% if record.verbal_confirm_datetime %}
+                                <div class="col-sm-4">
+                                    <span class="section-label">Date / Time</span>
+                                    <div>{{ record.verbal_confirm_datetime }}</div>
+                                </div>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- AVS Score + Validation Evidence -->
+                    <div class="col-12 mt-2">
+                        <div class="card bg-light border-0 p-2">
+                            <div class="row g-2 align-items-center">
+                                <div class="col-sm-3">
+                                    <span class="section-label">AVS Score</span>
+                                    <div class="fw-semibold">
+                                        {% if record.get('avs_score') %}
+                                            {{ record.avs_score }} / 100
+                                            {% if record.avs_score | int < 90 %}
+                                            <span class="badge bg-warning text-dark ms-1">Below 90</span>
+                                            {% endif %}
+                                        {% else %}
+                                            <span class="text-muted">Not entered</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                {% set attachments = record.get('attachments', {}) %}
+                                {% set docs = record.get('docs_checklist', {}) %}
+                                <div class="col-sm-4">
+                                    <span class="section-label">AVS Validation Evidence</span>
+                                    <div class="mt-1 small text-muted mb-1">WF AVS screenshot</div>
+                                    <div>
+                                        {% if docs.get('wf_avs_screenshot') %}
+                                        <i class="fas fa-check-circle text-success me-1"></i>
+                                        <span class="text-success fw-semibold">Attached</span>
+                                        {% else %}
+                                        <span class="badge bg-warning text-dark">Not attached</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                                <div class="col-sm-5">
+                                    <span class="section-label">Validation Evidence</span>
+                                    <div class="mt-1 small text-muted mb-1">Alternative verification file</div>
+                                    <div>
+                                        {% if attachments.get('validation_evidence') %}
+                                        <i class="fas fa-paperclip text-success me-1"></i>
+                                        <span class="text-success fw-semibold">{{ attachments.validation_evidence }}</span>
+                                        {% else %}
+                                        <span class="badge bg-warning text-dark">Not attached</span>
+                                        {% endif %}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── C: Originating Banking Information ─────────── -->
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-university me-2"></i>C — Originating Banking Information</h6>
+            </div>
+            <div class="card-body small">
+                <div class="alert alert-secondary py-1 px-2 mb-3 small">
+                    <i class="fas fa-lock me-1"></i>
+                    Account and routing numbers are masked by default.
+                    <strong>Demo only</strong> — reveal toggle shown for prototype UX demonstration.
+                    {# [RBAC] TODO: Only show reveal option to authorized treasury roles #}
+                </div>
+                <div class="row g-3">
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Bank Name</span>
+                        <div>{{ record.orig_bank_name or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Account Name</span>
+                        <div>{{ record.orig_account_name or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Account Number</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="orig-acct-masked" class="masked-value">{{ record.orig_account_number_masked }}</span>
+                            <span id="orig-acct-unmasked" class="unmasked-value">{{ record.orig_account_number }}</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
+                                    id="orig-acct-toggle"
+                                    onclick="toggleMask('orig-acct')">
+                                <i class="fas fa-eye me-1"></i>Reveal
+                            </button>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Routing Number</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="orig-rtn-masked" class="masked-value">{{ record.orig_routing_number_masked }}</span>
+                            <span id="orig-rtn-unmasked" class="unmasked-value">{{ record.orig_routing_number }}</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
+                                    id="orig-rtn-toggle"
+                                    onclick="toggleMask('orig-rtn')">
+                                <i class="fas fa-eye me-1"></i>Reveal
+                            </button>
+                        </div>
+                    </div>
+                    {% if record.orig_bank_contact %}
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Bank Contact</span>
+                        <div>{{ record.orig_bank_contact }}</div>
+                    </div>
+                    {% endif %}
+                    {% if record.notes_orig %}
+                    <div class="col-12">
+                        <span class="section-label">Notes</span>
+                        <div class="text-muted fst-italic">{{ record.notes_orig }}</div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+
+        <!-- ── D: Receiving Bank Information ──────────────── -->
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-exchange-alt me-2"></i>D — Receiving Bank Information</h6>
+            </div>
+            <div class="card-body small">
+                <div class="row g-3">
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Recipient / Payee Name</span>
+                        <div class="fw-semibold">{{ record.recv_payee_name or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Receiving Bank</span>
+                        <div>{{ record.recv_bank_name or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Account Name</span>
+                        <div>{{ record.recv_account_name or '—' }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Account Number</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="recv-acct-masked" class="masked-value">{{ record.recv_account_number_masked }}</span>
+                            <span id="recv-acct-unmasked" class="unmasked-value">{{ record.recv_account_number }}</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
+                                    id="recv-acct-toggle"
+                                    onclick="toggleMask('recv-acct')">
+                                <i class="fas fa-eye me-1"></i>Reveal
+                            </button>
+                        </div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Routing Number</span>
+                        <div class="d-flex align-items-center gap-2">
+                            <span id="recv-rtn-masked" class="masked-value">{{ record.recv_routing_number_masked }}</span>
+                            <span id="recv-rtn-unmasked" class="unmasked-value">{{ record.recv_routing_number }}</span>
+                            <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
+                                    id="recv-rtn-toggle"
+                                    onclick="toggleMask('recv-rtn')">
+                                <i class="fas fa-eye me-1"></i>Reveal
+                            </button>
+                        </div>
+                    </div>
+                    {% if record.recv_bank_address %}
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Bank / Beneficiary Address</span>
+                        <div>{{ record.recv_bank_address }}</div>
+                    </div>
+                    {% endif %}
+                    {% if record.recv_contact_name %}
+                    <div class="col-sm-4 col-md-3">
+                        <span class="section-label">Contact Name</span>
+                        <div>{{ record.recv_contact_name }}</div>
+                    </div>
+                    {% endif %}
+                    {% if record.recv_contact_email %}
+                    <div class="col-sm-4 col-md-3">
+                        <span class="section-label">Contact Email</span>
+                        <div>{{ record.recv_contact_email }}</div>
+                    </div>
+                    {% endif %}
+                    {% if record.recv_contact_phone %}
+                    <div class="col-sm-4 col-md-3">
+                        <span class="section-label">Contact Phone</span>
+                        <div>{{ record.recv_contact_phone }}</div>
+                    </div>
+                    {% endif %}
+                    {% if record.notes_recv %}
+                    <div class="col-12">
+                        <span class="section-label">Notes</span>
+                        <div class="text-muted fst-italic">{{ record.notes_recv }}</div>
+                    </div>
+                    {% endif %}
+
+                    <!-- External ACH/Wire Instructions Attachment -->
+                    {% set attachments = record.get('attachments', {}) %}
+                    <div class="col-12">
+                        <div class="card bg-light border-0 p-2">
+                            <span class="section-label">External ACH/Wire Instructions</span>
+                            <div class="mt-1">
+                                {% if attachments.get('wire_ach_instructions') %}
+                                <i class="fas fa-paperclip text-success me-1"></i>
+                                <span class="text-success fw-semibold small">{{ attachments.wire_ach_instructions }}</span>
+                                {% else %}
+                                <span class="badge bg-danger">Missing</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ── E: Transaction Details ──────────────────────── -->
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-dollar-sign me-2"></i>E — Transaction Details</h6>
+            </div>
+            <div class="card-body">
+                <div class="row g-3 small">
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Amount</span>
+                        <div class="fw-bold fs-4 text-primary">{{ record.amount | currency }}</div>
+                        <div class="text-muted">{{ record.currency }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Required Approval Tier</span>
+                        <div class="mt-1">
+                            <span class="badge px-2 py-1
+                                {% if 'CFO' in record.approval_tier %}tier-badge-cfo
+                                {% elif 'Vice' in record.approval_tier %}tier-badge-vp
+                                {% elif 'Controller' in record.approval_tier %}tier-badge-controller
+                                {% else %}tier-badge-sam{% endif %}">
+                                {{ record.approval_tier }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <span class="section-label">Payment Purpose / Description</span>
+                        <div>{{ record.payment_purpose or '—' }}</div>
+                    </div>
+
+                    <!-- Payment Support Attachment -->
+                    {% set attachments = record.get('attachments', {}) %}
+                    <div class="col-12">
+                        <div class="card bg-light border-0 p-2">
+                            <span class="section-label">Payment Support</span>
+                            <div class="mt-1">
+                                {% if attachments.get('payment_support') %}
+                                <i class="fas fa-paperclip text-success me-1"></i>
+                                <span class="text-success fw-semibold small">{{ attachments.payment_support }}</span>
+                                {% else %}
+                                <span class="badge bg-danger">Missing</span>
+                                {% endif %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+    </div><!-- /col-xl-8 -->
+
+    <!-- ═══ RIGHT COLUMN: Actions / Timeline / Comments ══════════ -->
+    <div class="col-xl-4">
+        <div class="sticky-sidebar">
+
+            <!-- ── Approval Actions ──────────────────────────── -->
+            <div class="card shadow-sm mb-4 border-primary">
+                <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
+                    <i class="fas fa-tasks"></i>
+                    <strong>Approval Actions</strong>
+                    <span class="badge bg-warning text-dark ms-auto small">Demo Only</span>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">
+                        Actions below update mock status only.
+                        {# [WORKFLOW] TODO: Trigger real approval routing engine #}
+                        {# [EMAIL]    TODO: Send notification email on status change #}
+                        {# [AUDIT]    TODO: Write to immutable audit log #}
+                    </p>
+                    <form method="POST"
+                          action="{{ url_for('request_action', request_id=record.request_id) }}"
+                          id="action-form">
+
+                        <!-- Comment field -->
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold" for="action-comment">
+                                Comment (optional)
+                            </label>
+                            <textarea class="form-control form-control-sm" id="action-comment"
+                                      name="comment" rows="2"
+                                      placeholder="Add a note for the record..."></textarea>
+                        </div>
+
+                        <!-- Action buttons -->
+                        <div class="d-grid gap-2">
+                            <button type="submit" name="action" value="approve"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Approve', '{{ record.request_id }}')">
+                                <i class="fas fa-check me-1"></i>Approve
+                            </button>
+                            <button type="submit" name="action" value="more_info"
+                                    class="btn btn-warning btn-sm text-dark"
+                                    onclick="return confirmAction('Request More Information', '{{ record.request_id }}')">
+                                <i class="fas fa-question-circle me-1"></i>Request More Information
+                            </button>
+                            <button type="submit" name="action" value="cancel"
+                                    class="btn btn-outline-danger btn-sm"
+                                    onclick="return confirmAction('Cancel', '{{ record.request_id }}')">
+                                <i class="fas fa-times me-1"></i>Cancel Transaction
+                            </button>
+                            <!-- <hr class="my-1">
+                            <button type="submit" name="action" value="treasury_reviewed"
+                                    class="btn btn-info btn-sm text-white"
+                                    onclick="return confirmAction('Mark as Treasury Reviewed', '{{ record.request_id }}')">
+                                <i class="fas fa-search-dollar me-1"></i>Mark as Treasury Reviewed
+                            </button>
+                            <button type="submit" name="action" value="mark_released"
+                                    class="btn btn-outline-success btn-sm"
+                                    onclick="return confirmAction('Mark as Released', '{{ record.request_id }}')">
+                                <i class="fas fa-paper-plane me-1"></i>Mark as Released
+                            </button>
+                            <button type="submit" name="action" value="mark_completed"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Mark as Completed', '{{ record.request_id }}')">
+                                <i class="fas fa-check-double me-1"></i>Mark as Completed
+                            </button> -->
+                        </div>
+                    </form>
+                </div>
+            </div>
+
+            <!-- ── Approval Timeline ─────────────────────────── -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-history text-secondary"></i>
+                    <strong class="small text-uppercase">Approval Timeline</strong>
+                </div>
+                <div class="card-body">
+                    {% if record.get('timeline') %}
+                    <div class="timeline">
+                        {% for event in record.timeline %}
+                        <div class="timeline-item">
+                            <div class="timeline-dot dot-{{ event.get('type', 'routed') }}"></div>
+                            <div class="small">
+                                <div class="fw-semibold">{{ event.event }}</div>
+                                <div class="text-muted">{{ event.date }}</div>
+                                <div class="mt-1">
+                                    <span class="badge {{ event.status | status_badge_class }} small px-1">
+                                        {{ event.status }}
+                                    </span>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="text-muted small text-center py-2">No timeline events yet.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- ── Comments / Notes ──────────────────────────── -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-comments text-secondary"></i>
+                    <strong class="small text-uppercase">Comments / Notes</strong>
+                    {% if record.get('comments') %}
+                    <span class="badge bg-secondary ms-auto">{{ record.comments | length }}</span>
+                    {% endif %}
+                </div>
+                <div class="card-body p-0">
+                    {% if record.get('comments') %}
+                    {% for comment in record.comments %}
+                    <div class="px-3 py-2 {% if not loop.last %}border-bottom{% endif %}">
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <span class="fw-semibold small">
+                                <i class="fas fa-user-circle me-1 text-muted"></i>{{ comment.author }}
+                            </span>
+                            <small class="text-muted">{{ comment.date }}</small>
+                        </div>
+                        <p class="small mb-0 text-muted">{{ comment.text }}</p>
+                    </div>
+                    {% endfor %}
+                    {% else %}
+                    <div class="text-muted small text-center py-3">No comments yet.</div>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- ── Additional Attachments ─────────────────────── -->
+            <div class="card shadow-sm mb-4">
+                <div class="card-header bg-light d-flex align-items-center gap-2">
+                    <i class="fas fa-paperclip text-secondary"></i>
+                    <strong class="small text-uppercase">Additional Attachments</strong>
+                    {% if record.get('extra_attachments') %}
+                    <span class="badge bg-secondary ms-auto">{{ record.extra_attachments | length }}</span>
+                    {% endif %}
+                </div>
+                <div class="card-body">
+                    {% if record.get('extra_attachments') %}
+                    <ul class="list-unstyled mb-3">
+                        {% for att in record.extra_attachments %}
+                        <li class="d-flex align-items-start gap-2 mb-2 small pb-2 {% if not loop.last %}border-bottom{% endif %}">
+                            <i class="fas fa-file text-primary mt-1 flex-shrink-0"></i>
+                            <div>
+                                <div class="fw-semibold">{{ att.filename }}</div>
+                                {% if att.description %}
+                                <div class="text-muted">{{ att.description }}</div>
+                                {% endif %}
+                                <div class="text-muted" style="font-size:0.7rem;">
+                                    {{ att.uploaded_by }} &bull; {{ att.date }}
+                                </div>
+                            </div>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                    {% else %}
+                    <p class="text-muted small mb-3">No additional files attached yet.</p>
+                    {% endif %}
+
+                    <form method="POST"
+                          action="{{ url_for('request_attach', request_id=record.request_id) }}"
+                          enctype="multipart/form-data">
+                        <div class="mb-2">
+                            <label class="form-label small fw-semibold mb-1" for="extra-files">Attach Files</label>
+                            <input type="file" class="form-control form-control-sm" id="extra-files"
+                                   name="extra_files" multiple>
+                        </div>
+                        <div class="mb-2">
+                            <input type="text" class="form-control form-control-sm"
+                                   name="attachment_description"
+                                   placeholder="Description (optional)"
+                                   maxlength="200">
+                        </div>
+                        <button type="submit" class="btn btn-outline-secondary btn-sm w-100">
+                            <i class="fas fa-upload me-1"></i>Upload
+                        </button>
+                    </form>
+                    <div class="text-muted mt-2" style="font-size:0.7rem;">
+                        <i class="fas fa-flask me-1"></i>Prototype: filenames recorded only. [<code>UPLOAD</code>]
+                    </div>
+                </div>
+            </div>
+
+            <!-- ── Prototype Notice ──────────────────────────── -->
+            <div class="card border-warning">
+                <div class="card-body py-2 d-flex align-items-start gap-2 small text-muted">
+                    <i class="fas fa-flask text-warning mt-1 flex-shrink-0"></i>
+                    <div>
+                        <strong>Demo only.</strong>
+                        Actions update session memory. Pre-loaded mock records cannot be permanently modified in this prototype.
+                        {# [AUTH]    TODO: Restrict actions by user role #}
+                        {# [STORAGE] TODO: Persist status changes to database #}
+                    </div>
+                </div>
+            </div>
+
+        </div><!-- /sticky-sidebar -->
+    </div><!-- /col-xl-4 -->
+
+</div><!-- /row -->
+{% endblock %}
