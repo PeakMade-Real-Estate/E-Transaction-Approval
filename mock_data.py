@@ -6,13 +6,26 @@ All data is fictional and for demonstration purposes only.
 
 def get_approval_tier(amount: float) -> str:
     """Return required approval / release tier based on transaction amount."""
-    if amount > 1_000_000:
-        return "CFO (Additional Approval Required)"
-    if amount > 500_000:
+    if amount >= 1_000_000:
+        return "Vice President + CFO"
+    if amount >= 500_000:
         return "Vice President"
-    if amount > 250_000:
+    if amount >= 250_000:
         return "Controller"
     return "Senior Accounting Manager / Assistant Controller"
+
+
+_TIER_STATUS_MAP = {
+    "Senior Accounting Manager / Assistant Controller": "Pending SAM Approval",
+    "Controller":                                       "Pending Controller Approval",
+    "Vice President":                                   "Pending VP Approval",
+    "Vice President + CFO":                             "Pending CFO Approval",
+}
+
+
+def tier_to_status(tier: str) -> str:
+    """Map an approval tier string to its corresponding pending-approval status."""
+    return _TIER_STATUS_MAP.get(tier, "Pending SAM Approval")
 
 
 def mask_account(number: str) -> str:
@@ -254,7 +267,7 @@ MOCK_REQUESTS = [
         "last_used_date":        "",
         "amount":                2_150_000.00,
         "currency":              "USD",
-        "approval_tier":         "CFO (Additional Approval Required)",
+        "approval_tier":         "Vice President + CFO",
         "status":                "Pending CFO Approval",
         "urgent":                False,
         "urgency_reason":        "",
@@ -324,7 +337,7 @@ MOCK_REQUESTS = [
         "amount":                89_500.00,
         "currency":              "USD",
         "approval_tier":         "Senior Accounting Manager / Assistant Controller",
-        "status":                "Submitted",
+        "status":                "Pending SAM Approval",
         "urgent":                True,
         "urgency_reason":        "Vendor contract deadline – payment required by EOD to avoid $5,000 late penalty.",
         "assigned_approver":     "Tom Barrett",
@@ -367,7 +380,8 @@ MOCK_REQUESTS = [
             "confirmation_email": False,
         },
         "timeline": [
-            {"date": "2026-07-07", "event": "Submitted by Susan Lee (URGENT)", "actor": "Susan Lee", "status": "Submitted", "type": "submitted"},
+            {"date": "2026-07-07", "event": "Submitted by Susan Lee (URGENT)",  "actor": "Susan Lee", "status": "Submitted",             "type": "submitted"},
+            {"date": "2026-07-07", "event": "Routed for SAM Approval (URGENT)", "actor": "System",    "status": "Pending SAM Approval", "type": "routed"},
         ],
         "comments": [
             {"author": "Susan Lee", "date": "2026-07-07", "text": "URGENT: HVAC compressor failed at Riverside Commons. Vendor requires payment by 5 PM today to begin repairs. AVS screenshot and authorization to move funds still pending – will follow up immediately."},

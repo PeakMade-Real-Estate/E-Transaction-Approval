@@ -24,13 +24,28 @@ from flask import (
 )
 from datetime import datetime
 import copy
+import os
 import random
 
-from mock_data import MOCK_REQUESTS, get_approval_tier, mask_account, mask_routing
+from dotenv import load_dotenv
+load_dotenv()  # loads .env into os.environ; no-op if file is absent
+
+from mock_data import MOCK_REQUESTS, get_approval_tier, tier_to_status, mask_account, mask_routing
+import db
 
 app = Flask(__name__)
-# [AUTH] TODO: Replace with os.environ.get('SECRET_KEY') — never hardcode in production
-app.secret_key = "etxn-demo-prototype-2026-not-for-production"
+# [AUTH] TODO: Rotate this key before any real deployment
+app.secret_key = os.environ.get("SECRET_KEY") or "etxn-demo-prototype-2026-not-for-production"
+
+# Display names used in timeline / comment author fields
+ROLE_DISPLAY = {
+    "submitter":  "Submitter",
+    "sam":        "Sr. Accounting Manager",
+    "controller": "Controller",
+    "vp":         "Vice President",
+    "cfo":        "CFO",
+    "treasury":   "Treasury Manager",
+}
 
 # ─────────────────────────────────────────────────────────────
 #  Jinja2 Filters & Context Processors
@@ -39,6 +54,7 @@ app.secret_key = "etxn-demo-prototype-2026-not-for-production"
 STATUS_BADGE_MAP = {
     "Draft":                        "bg-secondary",
     "Submitted":                    "bg-info text-dark",
+    "Pending SAM Approval":         "bg-info text-dark",
     "Pending Controller Approval":  "bg-warning text-dark",
     "Pending VP Approval":          "badge-orange",
     "Pending CFO Approval":         "bg-danger",
@@ -48,6 +64,7 @@ STATUS_BADGE_MAP = {
     "Completed":                    "bg-success",
     "Rejected":                     "bg-danger",
     "Needs More Information":       "bg-warning text-dark",
+    "Cancelled":                    "bg-secondary",
 }
 
 
@@ -106,7 +123,7 @@ def role_select():
     """Prototype role picker — simulates future Azure AD role assignment. [AUTH]"""
     if request.method == "POST":
         role = request.form.get("role", "")
-        if role in ("submitter", "approver", "treasury"):
+        if role in ("submitter", "sam", "controller", "vp", "cfo", "treasury"):
             session["role"] = role
         return redirect(url_for("dashboard"))
     if session.get("role"):
@@ -124,6 +141,9 @@ def switch_role():
 @app.route("/intake")
 def intake():
     """Treasury Request Intake Form."""
+    if session.get("role") == "treasury":
+        flash("Treasury role does not submit payment requests.", "warning")
+        return redirect(url_for("dashboard"))
     return render_template("intake.html")
 
 
@@ -138,6 +158,9 @@ def intake_submit():
     [UPLOAD]   TODO: Process and store attached documents.
     [AUDIT]    TODO: Write submission event to audit log.
     """
+    if session.get("role") == "treasury":
+        flash("Treasury role does not submit payment requests.", "warning")
+        return redirect(url_for("dashboard"))
     frm = request.form
 
     try:
@@ -171,7 +194,8 @@ def intake_submit():
         "amount":                amount,
         "currency":              frm.get("currency", "USD"),
         "approval_tier":         approval_tier,
-        "status":                "Submitted",
+        # [WORKFLOW] Auto-routed to the correct approval tier on submission
+        "status":                tier_to_status(approval_tier),
         "urgent":                frm.get("urgent") == "yes",
         "urgency_reason":        frm.get("urgency_reason", ""),
         "payment_purpose":       frm.get("payment_purpose", ""),
@@ -225,7 +249,14 @@ def intake_submit():
                 "actor":  frm.get("prepared_by", "Unknown User"),
                 "status": "Submitted",
                 "type":   "submitted",
-            }
+            },
+            {
+                "date":   datetime.now().strftime("%Y-%m-%d"),
+                "event":  f"Routed for {approval_tier} Approval",
+                "actor":  "System",
+                "status": tier_to_status(approval_tier),
+                "type":   "routed",
+            },
         ],
         "comments": [],
     }
@@ -251,22 +282,46 @@ def confirmation(request_id):
 @app.route("/dashboard")
 def dashboard():
     """
-    Approver Dashboard — all requests with summary stats and filters.
+    Dashboard — filtered by role; all requests for VP/CFO/Treasury, tier queue for others.
 
-    [AUTH]    TODO: Filter results by current user's role and permissions.
+    [AUTH]    TODO: Filter results by real user identity and permissions from Azure AD.
     [STORAGE] TODO: Query live data from SharePoint list / SQL.
     """
     submitted = session.get("submitted_requests", [])
-    all_requests = MOCK_REQUESTS + submitted
+    role      = session.get("role")
+
+    # [STORAGE] Set DB_ENABLED=true in .env when the database is ready
+    _db_on = os.environ.get("DB_ENABLED", "false").lower() == "true"
+    try:
+        db_records = db.get_dashboard_records() if _db_on else list(MOCK_REQUESTS)
+    except Exception:
+        db_records = list(MOCK_REQUESTS)
+
+    all_requests = db_records + submitted
+
+    # [AUTH] Role-based scoping — replace with real RBAC when Azure AD is integrated
+    if role == "submitter":
+        scoped = list(submitted)
+    elif role == "sam":
+        scoped = [r for r in all_requests if r["status"] == "Pending SAM Approval"]
+    elif role == "controller":
+        scoped = [r for r in all_requests if r["status"] == "Pending Controller Approval"]
+    else:  # vp, cfo, treasury — full visibility
+        scoped = list(all_requests)
 
     stats = {
-        "total":              len(all_requests),
-        "pending_controller": sum(1 for r in all_requests if r["status"] == "Pending Controller Approval"),
-        "pending_treasury":   sum(1 for r in all_requests if r["status"] == "Pending Treasury Review"),
-        "pending_release":    sum(1 for r in all_requests if r["status"] == "Pending Release"),
-        "completed":          sum(1 for r in all_requests if r["status"] in ("Completed", "Released")),
-        "urgent":             sum(1 for r in all_requests if r.get("urgent", False)),
-        "over_1m":            sum(1 for r in all_requests if r.get("amount", 0) > 1_000_000),
+        "total":              len(scoped),
+        "pending_sam":        sum(1 for r in scoped if r["status"] == "Pending SAM Approval"),
+        "pending_controller": sum(1 for r in scoped if r["status"] == "Pending Controller Approval"),
+        "pending_vp":         sum(1 for r in scoped if r["status"] == "Pending VP Approval"),
+        "pending_cfo":        sum(1 for r in scoped if r["status"] == "Pending CFO Approval"),
+        "pending_treasury":   sum(1 for r in scoped if r["status"] == "Pending Treasury Review"),
+        "pending_release":    sum(1 for r in scoped if r["status"] == "Pending Release"),
+        "completed":          sum(1 for r in scoped if r["status"] in ("Completed", "Released")),
+        "needs_more_info":    sum(1 for r in scoped if r["status"] == "Needs More Information"),
+        "rejected":           sum(1 for r in scoped if r["status"] == "Rejected"),
+        "urgent":             sum(1 for r in scoped if r.get("urgent", False)),
+        "over_1m":            sum(1 for r in scoped if r.get("amount", 0) > 1_000_000),
     }
 
     f_status   = request.args.get("status", "").strip()
@@ -278,7 +333,7 @@ def dashboard():
     f_amt_min  = request.args.get("amount_min", "").strip()
     f_amt_max  = request.args.get("amount_max", "").strip()
 
-    filtered = list(all_requests)
+    filtered = list(scoped)
     if f_status:
         filtered = [r for r in filtered if r["status"] == f_status]
     if f_type:
@@ -304,9 +359,9 @@ def dashboard():
 
     filtered.sort(key=lambda r: r["submitted_date"], reverse=True)
 
-    all_statuses  = sorted({r["status"] for r in all_requests})
-    all_types     = sorted({r["request_type"] for r in all_requests})
-    all_approvers = sorted({r.get("assigned_approver", "") for r in all_requests if r.get("assigned_approver")})
+    all_statuses  = sorted({r["status"] for r in scoped})
+    all_types     = sorted({r["request_type"] for r in scoped})
+    all_approvers = sorted({r.get("assigned_approver", "") for r in scoped if r.get("assigned_approver")})
 
     return render_template(
         "dashboard.html",
@@ -337,9 +392,18 @@ def request_detail(request_id):
     [RBAC]  TODO: Mask account numbers by user role, not a demo toggle.
     [AUDIT] TODO: Log each access to sensitive banking data.
     """
-    submitted = session.get("submitted_requests", [])
-    all_requests = MOCK_REQUESTS + submitted
-    record = next((r for r in all_requests if r["request_id"] == request_id), None)
+    record = None
+    _db_on = os.environ.get("DB_ENABLED", "false").lower() == "true"
+    if _db_on:
+        try:
+            record = db.get_request_detail(request_id)
+        except Exception:
+            pass
+
+    if record is None:
+        submitted = session.get("submitted_requests", [])
+        all_requests = MOCK_REQUESTS + submitted
+        record = next((r for r in all_requests if r["request_id"] == request_id), None)
 
     if not record:
         flash("Request not found.", "warning")
@@ -367,37 +431,90 @@ def request_action(request_id):
     """
     action  = request.form.get("action", "")
     comment = request.form.get("comment", "").strip()
+    role    = session.get("role")
 
     action_map = {
-        "approve":           ("Pending Treasury Review",   "Approved",                          "success"),
-        "reject":            ("Rejected",                  "Rejected",                          "danger"),
-        "more_info":         ("Needs More Information",    "Returned – More Information Needed", "warning"),
-        "treasury_reviewed": ("Pending Release",           "Marked as Treasury Reviewed",       "info"),
-        "mark_released":     ("Released",                  "Marked as Released",                "success"),
-        "mark_completed":    ("Completed",                 "Marked as Completed",               "success"),
+        "approve":           ("Pending Treasury Review",   "Approved",                           "success"),
+        "reject":            ("Rejected",                  "Rejected",                           "danger"),
+        "more_info":         ("Needs More Information",    "Returned \u2013 More Information Needed", "warning"),
+        "cancel":            ("Cancelled",                 "Cancelled by Submitter",              "secondary"),
+        "treasury_reviewed": ("Pending Release",           "Marked as Treasury Reviewed",         "info"),
+        "mark_released":     ("Released",                  "Marked as Released",                  "success"),
+        "mark_completed":    ("Completed",                 "Marked as Completed",                 "success"),
     }
 
-    if action not in action_map:
+    # resubmit target status is computed from the record's tier, so handled separately
+    if action not in action_map and action != "resubmit":
         flash("Unknown action.", "danger")
         return redirect(url_for("request_detail", request_id=request_id))
 
-    new_status, label, cat = action_map[action]
+    # Look up current status for authorization check
+    submitted    = session.get("submitted_requests", [])
+    all_requests = MOCK_REQUESTS + submitted
+    record_ref   = next((r for r in all_requests if r["request_id"] == request_id), None)
+    cur_status   = record_ref["status"] if record_ref else ""
 
-    submitted = session.get("submitted_requests", [])
+    # [RBAC] Role+status authorization — simulates permission gates that Azure AD will enforce
+    ALLOWED: dict[str, dict[str, bool]] = {
+        "submitter": {
+            "cancel":   cur_status in ("Submitted", "Pending SAM Approval", "Needs More Information"),
+            "resubmit": cur_status == "Needs More Information",
+        },
+        "sam": {
+            "approve":   cur_status == "Pending SAM Approval",
+            "reject":    cur_status == "Pending SAM Approval",
+            "more_info": cur_status == "Pending SAM Approval",
+        },
+        "controller": {
+            "approve":   cur_status == "Pending Controller Approval",
+            "reject":    cur_status == "Pending Controller Approval",
+            "more_info": cur_status == "Pending Controller Approval",
+        },
+        "vp": {
+            "approve":   cur_status == "Pending VP Approval",
+            "reject":    cur_status == "Pending VP Approval",
+            "more_info": cur_status == "Pending VP Approval",
+        },
+        "cfo": {
+            "approve":   cur_status == "Pending CFO Approval",
+            "reject":    cur_status == "Pending CFO Approval",
+            "more_info": cur_status == "Pending CFO Approval",
+        },
+        "treasury": {
+            "treasury_reviewed": cur_status == "Pending Treasury Review",
+            "mark_released":     cur_status == "Pending Release",
+            "mark_completed":    cur_status == "Released",
+        },
+    }
+    if not ALLOWED.get(role, {}).get(action, False):
+        flash("Your role is not authorized to take this action at the current stage.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    # Resolve new status and message
+    if action == "resubmit":
+        tier       = record_ref.get("approval_tier", "") if record_ref else ""
+        new_status = tier_to_status(tier)
+        label      = "Resubmitted with Additional Information"
+        cat        = "info"
+    else:
+        new_status, label, cat = action_map[action]
+
+    actor = ROLE_DISPLAY.get(role, "Demo User")
+
     updated = False
     for r in submitted:
         if r["request_id"] == request_id:
             r["status"] = new_status
             if comment:
                 r.setdefault("comments", []).append({
-                    "author": "Demo User",
+                    "author": actor,
                     "date":   datetime.now().strftime("%Y-%m-%d"),
                     "text":   comment,
                 })
             r.setdefault("timeline", []).append({
                 "date":   datetime.now().strftime("%Y-%m-%d"),
-                "event":  f"{label} — Demo User",
-                "actor":  "Demo User",
+                "event":  f"{label} \u2014 {actor}",
+                "actor":  actor,
                 "status": new_status,
                 "type":   action,
             })

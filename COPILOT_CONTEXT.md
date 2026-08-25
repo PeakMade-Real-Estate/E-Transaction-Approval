@@ -57,7 +57,7 @@ COPILOT_CONTEXT.md      ← This file
 | `dashboard()` | ~218 | `GET /dashboard` → merges mock + session data, applies URL-param filters, computes stat cards |
 | `request_detail()` | ~290 | `GET /dashboard/request/<id>` → deep-copies record, masks account/routing numbers, renders detail page |
 | `request_action()` | ~315 | `POST /dashboard/request/<id>/action` → processes approve/reject/more_info/treasury_reviewed/mark_released/mark_completed; only mutates session records (mock records show flash warning) |
-| `get_approval_tier()` | mock_data.py ~7 | Amount thresholds: >$1M=CFO, >$500K=VP, >$250K=Controller, else SAM |
+| `get_approval_tier()` | mock_data.py ~7 | Amount thresholds: >=$1M=CFO, >=$500K=VP, >=$250K=Controller, else SAM |
 | `mask_account()` | mock_data.py ~14 | Shows only last 4 digits |
 | `mask_routing()` | mock_data.py ~21 | Shows only last 4 digits |
 

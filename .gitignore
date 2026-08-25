@@ -19,3 +19,7 @@ Thumbs.db
 # Editor
 .vscode/
 *.swp
+
+# Environment / secrets — never commit
+.env
+.env.*

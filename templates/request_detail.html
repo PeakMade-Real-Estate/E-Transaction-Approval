@@ -460,8 +460,14 @@
                                       placeholder="Add a note for the record..."></textarea>
                         </div>
 
-                        <!-- Action buttons -->
+                        <!-- Action buttons — role + status gated -->
                         <div class="d-grid gap-2">
+
+                        {# ── Approver-tier actions (same buttons, different status gate) ── #}
+                        {% if (current_role == 'sam' and record.status == 'Pending SAM Approval') or
+                              (current_role == 'controller' and record.status == 'Pending Controller Approval') or
+                              (current_role == 'vp' and record.status == 'Pending VP Approval') or
+                              (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
                             <button type="submit" name="action" value="approve"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Approve', '{{ record.request_id }}')">
@@ -472,27 +478,66 @@
                                     onclick="return confirmAction('Request More Information', '{{ record.request_id }}')">
                                 <i class="fas fa-question-circle me-1"></i>Request More Information
                             </button>
-                            <button type="submit" name="action" value="cancel"
+                            <button type="submit" name="action" value="reject"
                                     class="btn btn-outline-danger btn-sm"
-                                    onclick="return confirmAction('Cancel', '{{ record.request_id }}')">
-                                <i class="fas fa-times me-1"></i>Cancel Transaction
+                                    onclick="return confirmAction('Reject', '{{ record.request_id }}')">
+                                <i class="fas fa-times me-1"></i>Reject
                             </button>
-                            <!-- <hr class="my-1">
+
+                        {# ── Treasury actions ── #}
+                        {% elif current_role == 'treasury' %}
+                            {% if record.status == 'Pending Treasury Review' %}
                             <button type="submit" name="action" value="treasury_reviewed"
                                     class="btn btn-info btn-sm text-white"
                                     onclick="return confirmAction('Mark as Treasury Reviewed', '{{ record.request_id }}')">
                                 <i class="fas fa-search-dollar me-1"></i>Mark as Treasury Reviewed
                             </button>
+                            {% elif record.status == 'Pending Release' %}
                             <button type="submit" name="action" value="mark_released"
                                     class="btn btn-outline-success btn-sm"
                                     onclick="return confirmAction('Mark as Released', '{{ record.request_id }}')">
                                 <i class="fas fa-paper-plane me-1"></i>Mark as Released
                             </button>
+                            {% elif record.status == 'Released' %}
                             <button type="submit" name="action" value="mark_completed"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Mark as Completed', '{{ record.request_id }}')">
                                 <i class="fas fa-check-double me-1"></i>Mark as Completed
-                            </button> -->
+                            </button>
+                            {% else %}
+                            <div class="alert alert-secondary small py-2 mb-0 text-center">
+                                <i class="fas fa-info-circle me-1"></i>No treasury action at this stage.
+                            </div>
+                            {% endif %}
+
+                        {# ── Submitter actions ── #}
+                        {% elif current_role == 'submitter' %}
+                            {% if record.status == 'Needs More Information' %}
+                            <button type="submit" name="action" value="resubmit"
+                                    class="btn btn-primary btn-sm"
+                                    onclick="return confirmAction('Resubmit with Additional Information', '{{ record.request_id }}')">
+                                <i class="fas fa-reply me-1"></i>Resubmit with Additional Info
+                            </button>
+                            {% endif %}
+                            {% if record.status in ('Submitted', 'Pending SAM Approval', 'Needs More Information') %}
+                            <button type="submit" name="action" value="cancel"
+                                    class="btn btn-outline-danger btn-sm"
+                                    onclick="return confirmAction('Cancel this Request', '{{ record.request_id }}')">
+                                <i class="fas fa-ban me-1"></i>Cancel Request
+                            </button>
+                            {% else %}
+                            <div class="alert alert-secondary small py-2 mb-0 text-center">
+                                <i class="fas fa-info-circle me-1"></i>No actions available at this stage.
+                            </div>
+                            {% endif %}
+
+                        {# ── No actions for this role/status ── #}
+                        {% else %}
+                        <div class="alert alert-secondary small py-2 mb-0 text-center">
+                            <i class="fas fa-info-circle me-1"></i>No actions available for your role at this stage.
+                        </div>
+                        {% endif %}
+
                         </div>
                     </form>
                 </div>

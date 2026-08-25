@@ -7,21 +7,31 @@
 <div class="d-flex justify-content-between align-items-center mb-4 flex-wrap gap-2">
     <div>
         <h2 class="fw-bold mb-1">
-            <i class="fas fa-table-columns me-2 text-primary"></i>Approver Dashboard
+            <i class="fas fa-table-columns me-2 text-primary"></i>
+            {% if current_role == 'submitter' %}My Requests
+            {% elif current_role == 'sam' %}SAM Queue
+            {% elif current_role == 'controller' %}Controller Queue
+            {% elif current_role == 'vp' %}VP Dashboard
+            {% elif current_role == 'cfo' %}CFO Dashboard
+            {% elif current_role == 'treasury' %}Treasury Dashboard
+            {% else %}Dashboard
+            {% endif %}
         </h2>
         <p class="text-muted mb-0 small">
             Review and act on treasury transaction requests.
-            &ensp;<span class="badge bg-warning text-dark"><i class="fas fa-flask me-1"></i>Mock Data Only</span>
         </p>
     </div>
+    {% if current_role != 'treasury' %}
     <a href="{{ url_for('intake') }}" class="btn btn-primary">
         <i class="fas fa-plus me-1"></i> New Request
     </a>
+    {% endif %}
 </div>
 
 <!-- ── Summary Stat Cards ─────────────────────────────────────── -->
 <div class="row g-3 mb-4">
 
+    <!-- Total — always shown -->
     <div class="col-6 col-md-4 col-xl-2">
         <a href="{{ url_for('dashboard') }}" class="text-decoration-none">
             <div class="card stat-card text-white shadow-sm h-100" style="background-color:#1e3a5f;">
@@ -36,6 +46,25 @@
         </a>
     </div>
 
+    <!-- Pending SAM — sam, vp, cfo, treasury -->
+    {% if current_role in ('sam', 'vp', 'cfo', 'treasury') %}
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending SAM Approval') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#198754;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_sam }}</div>
+                        <div class="stat-label">Pending SAM</div>
+                    </div>
+                    <i class="fas fa-user-check stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+
+    <!-- Pending Controller — controller, vp, cfo, treasury -->
+    {% if current_role in ('controller', 'vp', 'cfo', 'treasury') %}
     <div class="col-6 col-md-4 col-xl-2">
         <a href="{{ url_for('dashboard', status='Pending Controller Approval') }}" class="text-decoration-none">
             <div class="card stat-card text-dark shadow-sm h-100" style="background-color:#ffc107;">
@@ -44,12 +73,49 @@
                         <div class="stat-number">{{ stats.pending_controller }}</div>
                         <div class="stat-label">Pending Controller</div>
                     </div>
-                    <i class="fas fa-user-check stat-icon"></i>
+                    <i class="fas fa-calculator stat-icon"></i>
                 </div>
             </div>
         </a>
     </div>
+    {% endif %}
 
+    <!-- Pending VP — vp, cfo, treasury -->
+    {% if current_role in ('vp', 'cfo', 'treasury') %}
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending VP Approval') }}" class="text-decoration-none">
+            <div class="card stat-card text-dark shadow-sm h-100" style="background-color:#20c997;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_vp }}</div>
+                        <div class="stat-label">Pending VP</div>
+                    </div>
+                    <i class="fas fa-user-tie stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+
+    <!-- Pending CFO — cfo, treasury -->
+    {% if current_role in ('cfo', 'treasury') %}
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Pending CFO Approval') }}" class="text-decoration-none">
+            <div class="card stat-card text-white shadow-sm h-100" style="background-color:#dc3545;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.pending_cfo }}</div>
+                        <div class="stat-label">Pending CFO</div>
+                    </div>
+                    <i class="fas fa-crown stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+
+    <!-- Pending Treasury — treasury -->
+    {% if current_role == 'treasury' %}
     <div class="col-6 col-md-4 col-xl-2">
         <a href="{{ url_for('dashboard', status='Pending Treasury Review') }}" class="text-decoration-none">
             <div class="card stat-card text-white shadow-sm h-100" style="background-color:#0d6efd;">
@@ -63,7 +129,10 @@
             </div>
         </a>
     </div>
+    {% endif %}
 
+    <!-- Pending Release — treasury -->
+    {% if current_role == 'treasury' %}
     <div class="col-6 col-md-4 col-xl-2">
         <a href="{{ url_for('dashboard', status='Pending Release') }}" class="text-decoration-none">
             <div class="card stat-card text-white shadow-sm h-100" style="background-color:#6f42c1;">
@@ -77,21 +146,44 @@
             </div>
         </a>
     </div>
+    {% endif %}
 
+    <!-- Needs More Info — submitter, sam, controller -->
+    {% if current_role in ('submitter', 'sam', 'controller') %}
+    <div class="col-6 col-md-4 col-xl-2">
+        <a href="{{ url_for('dashboard', status='Needs More Information') }}" class="text-decoration-none">
+            <div class="card stat-card text-dark shadow-sm h-100" style="background-color:#ffc107;">
+                <div class="card-body d-flex justify-content-between align-items-center">
+                    <div>
+                        <div class="stat-number">{{ stats.needs_more_info }}</div>
+                        <div class="stat-label">Needs More Info</div>
+                    </div>
+                    <i class="fas fa-question-circle stat-icon"></i>
+                </div>
+            </div>
+        </a>
+    </div>
+    {% endif %}
+
+    <!-- Completed — submitter, treasury -->
+    {% if current_role in ('submitter', 'treasury') %}
     <div class="col-6 col-md-4 col-xl-2">
         <a href="{{ url_for('dashboard', status='Completed') }}" class="text-decoration-none">
             <div class="card stat-card text-white shadow-sm h-100" style="background-color:#198754;">
                 <div class="card-body d-flex justify-content-between align-items-center">
                     <div>
                         <div class="stat-number">{{ stats.completed }}</div>
-                        <div class="stat-label">Completed / Released</div>
+                        <div class="stat-label">Completed</div>
                     </div>
                     <i class="fas fa-check-circle stat-icon"></i>
                 </div>
             </div>
         </a>
     </div>
+    {% endif %}
 
+    <!-- Urgent + >$1M mini cards — vp, cfo, treasury -->
+    {% if current_role in ('vp', 'cfo', 'treasury') %}
     <div class="col-6 col-md-4 col-xl-2">
         <div class="row g-2 h-100">
             <div class="col-6">
@@ -116,6 +208,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
 </div>
 
@@ -301,7 +394,7 @@
                     <!-- Flags -->
                     <td class="text-center text-nowrap">
                         {% if req.urgent %}
-                        <span class="badge bg-danger urgent-pulse" title="Urgent">
+                        <span class="badge bg-danger" title="Urgent">
                             <i class="fas fa-bolt"></i> Urgent
                         </span>
                         {% endif %}

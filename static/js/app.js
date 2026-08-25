@@ -18,10 +18,10 @@ const REQUEST_TYPE_HELP = {
 
 // ── Approval Tier Logic ───────────────────────────────────────
 function getApprovalTier(amount) {
-    if (amount > 1_000_000) return { tier: 'CFO (Additional Approval Required)', level: 'cfo',        icon: 'fa-star',       color: 'danger'  };
-    if (amount > 500_000)   return { tier: 'Vice President',                     level: 'vp',         icon: 'fa-user-tie',   color: 'warning' };
-    if (amount > 250_000)   return { tier: 'Controller',                         level: 'controller', icon: 'fa-user-check', color: 'primary' };
-    return { tier: 'Senior Accounting Manager / Assistant Controller',           level: 'sam',        icon: 'fa-user',       color: 'success' };
+    if (amount >= 1_000_000) return { tier: 'Vice President + CFO',                              level: 'cfo',        icon: 'fa-star',       color: 'danger'  };
+    if (amount >= 500_000)   return { tier: 'Vice President',                                    level: 'vp',         icon: 'fa-user-tie',   color: 'warning' };
+    if (amount >= 250_000)   return { tier: 'Controller',                                        level: 'controller', icon: 'fa-user-check', color: 'primary' };
+    return { tier: 'Senior Accounting Manager / Assistant Controller',                           level: 'sam',        icon: 'fa-user',       color: 'success' };
 }
 
 function formatCurrency(amount) {
@@ -98,16 +98,16 @@ function onAmountChange() {
             sidebarBadge.textContent = info.tier;
             sidebarBadge.className   = `badge tier-badge-${info.level} fs-6 px-3 py-2 mb-2 d-block`;
         }
-        if (sidebarCFO) sidebarCFO.style.display = amount > 1_000_000 ? 'block' : 'none';
+        if (sidebarCFO) sidebarCFO.style.display = amount >= 1_000_000 ? 'block' : 'none';
     }
 
     // ── Warning alerts ──
     const cfoWarning    = document.getElementById('cfo-warning');
     const vpNotice      = document.getElementById('vp-release-notice');
     const execNotice    = document.getElementById('exec-approval-notice');
-    if (cfoWarning)  cfoWarning.style.display  = amount > 1_000_000 ? 'block' : 'none';
-    if (vpNotice)    vpNotice.style.display    = amount > 500_000   ? 'block' : 'none';
-    if (execNotice)  execNotice.style.display  = amount > 1_000_000 ? 'inline' : 'none';
+    if (cfoWarning)  cfoWarning.style.display  = amount >= 1_000_000 ? 'block' : 'none';
+    if (vpNotice)    vpNotice.style.display    = amount >= 500_000   ? 'block' : 'none';
+    if (execNotice)  execNotice.style.display  = amount >= 1_000_000 ? 'inline' : 'none';
 
     // ── Tier guidance table row highlight ──
     ['sam', 'controller', 'vp', 'cfo'].forEach(level => {

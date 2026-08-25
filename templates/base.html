@@ -16,15 +16,6 @@
 </head>
 <body class="bg-light min-vh-100 d-flex flex-column">
 
-<!-- ── Prototype Banner ──────────────────────────────────────── -->
-<div class="prototype-banner text-center py-1 px-3">
-    <i class="fas fa-flask me-1"></i>
-    <strong>PROTOTYPE / DEMO &mdash; MOCK DATA ONLY</strong>
-    &ensp;&bull;&ensp; Not connected to real systems. No real banking data. For requirements-gathering purposes only.
-    &ensp;&bull;&ensp;
-    <i class="fas fa-flask me-1"></i>
-</div>
-
 <!-- ── Navbar ─────────────────────────────────────────────────── -->
 <nav class="navbar navbar-expand-lg navbar-dark bg-navy shadow-sm">
     <div class="container-fluid px-4">
@@ -47,20 +38,27 @@
                     </a>
                 </li>
                 <li class="nav-item ms-1">
+                    {% if current_role != 'treasury' %}
                     <a class="nav-link btn btn-sm btn-outline-light px-3 py-1
                               {% if request.endpoint == 'intake' %}active{% endif %}"
                        href="{{ url_for('intake') }}">
                         <i class="fas fa-plus me-1"></i> New Request
                     </a>
+                    {% endif %}
                 </li>
                 <!-- [AUTH] TODO: Replace with real user identity from Azure AD / MSAL -->
                 <li class="nav-item ms-3 pe-1">
                     <span class="nav-link py-0 d-flex align-items-center gap-2">
-                        <i class="fas fa-{% if current_role == 'submitter' %}file-pen{% elif current_role == 'approver' %}stamp{% elif current_role == 'treasury' %}vault{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
+                        <i class="fas fa-{% if current_role == 'submitter' %}file-pen{% elif current_role == 'sam' %}user-check{% elif current_role == 'controller' %}calculator{% elif current_role == 'vp' %}user-tie{% elif current_role == 'cfo' %}crown{% elif current_role == 'treasury' %}vault{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
                         <div class="lh-1">
                             <div class="text-white-50" style="font-size:0.7rem;">Testing as</div>
                             <div class="text-white fw-semibold" style="font-size:0.8rem;">
-                                {{ current_role | capitalize if current_role else 'Demo User' }}
+                                {% if current_role == 'sam' %}Sr. Acctg. Manager
+                                {% elif current_role == 'vp' %}Vice President
+                                {% elif current_role == 'cfo' %}CFO
+                                {% elif current_role == 'treasury' %}Treasury Manager
+                                {% elif current_role %}{{ current_role | capitalize }}
+                                {% else %}Demo User{% endif %}
                             </div>
                         </div>
                     </span>
