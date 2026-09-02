@@ -31,6 +31,7 @@ load_dotenv()  # loads .env into os.environ; no-op if file is absent
 from mock_data import MOCK_REQUESTS, get_approval_tier, tier_to_status, mask_account, mask_routing
 import db
 import sharepoint
+import auth
 
 app = Flask(__name__)
 # [AUTH] TODO: Rotate this key before any real deployment
@@ -80,12 +81,15 @@ def _upload_intake_attachments(request_id):
 
 # Display names used in timeline / comment author fields
 ROLE_DISPLAY = {
-    "submitter":  "Submitter",
-    "sam":        "Sr. Accounting Manager",
-    "controller": "Controller",
-    "vp":         "Vice President",
-    "cfo":        "CFO",
-    "treasury":   "Treasury Manager",
+    "submitter":           "Submitter",
+    "sam":                 "Sr. Accounting Manager",
+    "controller":          "Controller",
+    "vp":                  "Vice President",
+    "cfo":                 "CFO",
+    "treasury":            "Treasury Manager",
+    "business_admin":      "Business Administrator",
+    "it_admin":            "IT Administrator",
+    "treasury_bank_admin": "Treasury Backup (Bank Maintenance)",
 }
 
 # ─────────────────────────────────────────────────────────────
@@ -129,11 +133,13 @@ def yesno(value):
 
 @app.context_processor
 def inject_globals():
+    identity = auth.current_identity()
     return {
         "is_prototype": False,
         "current_year": datetime.now().year,
-        # [AUTH] TODO: Replace with Azure AD role claim from MSAL token
         "current_role": session.get("role"),
+        "auth_source":  identity["source"],
+        "can_switch_role": identity["source"] == "dev" or len(identity["roles"]) > 1,
     }
 
 
@@ -144,8 +150,34 @@ ROLE_FREE_ENDPOINTS = {"role_select", "switch_role", "static"}
 def require_role():
     if request.endpoint in ROLE_FREE_ENDPOINTS or request.endpoint is None:
         return None
+
+    identity = auth.current_identity()
+
+    if identity["source"] == "none":
+        return (
+            "Access denied: no authenticated identity was found and the local "
+            "developer login is disabled (DEV_LOGIN_ENABLED=false).",
+            403,
+        )
+
+    if identity["source"] == "easy_auth":
+        if not identity["roles"]:
+            return (
+                "Your account is signed in but has not been assigned an "
+                "E-Transaction application role. Contact an administrator.",
+                403,
+            )
+        if session.get("role") not in identity["roles"]:
+            if len(identity["roles"]) == 1:
+                session["role"] = identity["roles"][0]
+            else:
+                return redirect(url_for("role_select"))
+        return None
+
+    # source == "dev" — unchanged local role-switcher behavior
     if not session.get("role"):
         return redirect(url_for("role_select"))
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -161,15 +193,22 @@ def index():
 
 @app.route("/role-select", methods=["GET", "POST"])
 def role_select():
-    """Development role picker — simulates Azure AD role assignment. [AUTH]"""
+    """
+    Role picker. In production (Easy Auth), this only offers the roles Azure has
+    actually granted the signed-in user. Locally (DEV_LOGIN_ENABLED=true), it
+    offers every role for unrestricted development testing. [AUTH]
+    """
+    identity = auth.current_identity()
+    available_roles = identity["roles"] if identity["source"] == "easy_auth" else list(ROLE_DISPLAY.keys())
+
     if request.method == "POST":
         role = request.form.get("role", "")
-        if role in ("submitter", "sam", "controller", "vp", "cfo", "treasury"):
+        if role in available_roles:
             session["role"] = role
         return redirect(url_for("dashboard"))
-    if session.get("role"):
+    if session.get("role") in available_roles and session.get("role"):
         return redirect(url_for("dashboard"))
-    return render_template("role_select.html")
+    return render_template("role_select.html", available_roles=available_roles)
 
 
 @app.route("/switch-role")

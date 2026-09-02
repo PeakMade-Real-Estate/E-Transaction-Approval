@@ -46,26 +46,29 @@
                     </a>
                     {% endif %}
                 </li>
-                <!-- [AUTH] TODO: Replace with real user identity from Azure AD / MSAL -->
+                <!-- [AUTH] Identity source: Easy Auth in Azure, local dev role switcher otherwise -->
                 <li class="nav-item ms-3 pe-1">
                     <span class="nav-link py-0 d-flex align-items-center gap-2">
-                        <i class="fas fa-{% if current_role == 'submitter' %}file-pen{% elif current_role == 'sam' %}user-check{% elif current_role == 'controller' %}calculator{% elif current_role == 'vp' %}user-tie{% elif current_role == 'cfo' %}crown{% elif current_role == 'treasury' %}vault{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
+                        <i class="fas fa-{% if current_role == 'submitter' %}file-pen{% elif current_role == 'sam' %}user-check{% elif current_role == 'controller' %}calculator{% elif current_role == 'vp' %}user-tie{% elif current_role == 'cfo' %}crown{% elif current_role == 'treasury' %}vault{% elif current_role == 'business_admin' %}user-shield{% elif current_role == 'it_admin' %}laptop-code{% elif current_role == 'treasury_bank_admin' %}building-columns{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
                         <div class="lh-1">
-                            <div class="text-white-50" style="font-size:0.7rem;">Testing as</div>
+                            <div class="text-white-50" style="font-size:0.7rem;">{% if auth_source == 'easy_auth' %}Signed in as{% else %}Testing as{% endif %}</div>
                             <div class="text-white fw-semibold" style="font-size:0.8rem;">
                                 {% if current_role == 'sam' %}Sr. Acctg. Manager
                                 {% elif current_role == 'vp' %}Vice President
                                 {% elif current_role == 'cfo' %}CFO
                                 {% elif current_role == 'treasury' %}Treasury Manager
+                                {% elif current_role == 'business_admin' %}Business Admin
+                                {% elif current_role == 'it_admin' %}IT Admin
+                                {% elif current_role == 'treasury_bank_admin' %}Treasury Backup
                                 {% elif current_role %}{{ current_role | capitalize }}
                                 {% else %}Development User{% endif %}
                             </div>
                         </div>
                     </span>
                 </li>
-                {% if current_role and request.endpoint != 'role_select' %}
+                {% if current_role and request.endpoint != 'role_select' and can_switch_role %}
                 <li class="nav-item">
-                    <a class="nav-link text-white-50 px-2" href="{{ url_for('switch_role') }}" title="Switch testing role" style="font-size:0.75rem;">
+                    <a class="nav-link text-white-50 px-2" href="{{ url_for('switch_role') }}" title="Switch role" style="font-size:0.75rem;">
                         <i class="fas fa-right-left me-1"></i>Switch Role
                     </a>
                 </li>

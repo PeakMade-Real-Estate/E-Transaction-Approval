@@ -20,6 +20,7 @@ app.py                  ← Flask app: all routes, filters, session logic
 mock_data.py            ← Static mock records + helper functions
 db.py                   ← Fabric SQL data access (primary data source)
 sharepoint.py           ← SharePoint E Transaction Library access via Microsoft Graph (app-only auth)
+auth.py                 ← Identity/role resolution: Azure Easy Auth (prod) + local dev role switcher
 requirements.txt        ← pip dependencies
 
 templates/
@@ -197,6 +198,29 @@ File attachments are stored in the **E Transaction Library** SharePoint document
 - **Write:** `sharepoint.upload_attachment()` uploads a file into the request's folder and sets the library's metadata columns (`TransactionRequestID`, `DocumentSection`, `DocumentType`, `UploadedByRole`, `DocumentStatus`, `IsRequiredDocument`, `SourceSystem`, `OriginalFileName`, `AttachmentCorrelationID`, `Description`). Called from `intake_submit()` for the three named Section B/D/E files, and from `request_attach()` for additional files (`DocumentSection = Additional`, `DocumentType = Other`).
 - **Read:** `sharepoint.list_attachments()` lists all files in a request's folder with their metadata. Called from `request_detail()`; results are merged into `display['attachments']` / `display['attachment_urls']` (matched by `DOC_TYPE_TO_ATTACHMENT_KEY`) and `display['extra_attachments']`, reusing the existing template bindings rather than requiring new ones.
 - Failures in either direction are caught and logged; they do not block the request flow.
+
+---
+
+## Identity / Roles (auth.py)
+Production identity comes from **Azure App Service Easy Auth** (Entra ID). `auth.current_identity()` parses the `X-MS-CLIENT-PRINCIPAL*` headers Easy Auth injects, maps Entra App Role values to internal role codes via `AZURE_ROLE_TO_APP_ROLE`, and returns `{user_id, display_name, roles, source}`. Locally, `DEV_LOGIN_ENABLED=true` (default) falls back to the existing session-based role switcher (`role_select`/`switch_role`) so a developer can act as any role at any time without Easy Auth configured.
+
+`require_role` (before_request) now checks identity source: Easy Auth users are auto-assigned their sole granted role, prompted to choose among multiple, or rejected (403) if none are granted; dev-mode behavior is unchanged from before.
+
+**Internal role codes -> Entra App Role values to configure in Azure:**
+
+| Internal code | Entra App Role value | Business role |
+|---|---|---|
+| `submitter` | `Submitter` | Requester / Submitter |
+| `sam` | `Approver` | Approver (Sr. Accounting Manager tier) |
+| `controller` | `Controller` | Controller |
+| `vp` | `VP` | Vice President |
+| `cfo` | `CFO` | CFO |
+| `treasury` | `TreasuryManager` | Treasury Manager / Processor |
+| `business_admin` | `BusinessAdministrator` | Business Administrator |
+| `it_admin` | `ITAdministrator` | IT Administrator |
+| `treasury_bank_admin` | `TreasuryBankMaintenance` | Treasury Backup for Bank Account Maintenance |
+
+Bank Account Maintenance screens are intentionally not yet implemented; `treasury_bank_admin` is selectable but has no dedicated pages yet.
 
 ---
 

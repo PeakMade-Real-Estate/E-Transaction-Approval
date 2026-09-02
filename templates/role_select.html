@@ -20,6 +20,9 @@
     .role-card-vp:hover         { border-color: #20c997 !important; }
     .role-card-cfo:hover        { border-color: #dc3545 !important; }
     .role-card-treasury:hover   { border-color: #6f42c1 !important; }
+    .role-card-business_admin:hover      { border-color: #495057 !important; }
+    .role-card-it_admin:hover             { border-color: #0dcaf0 !important; }
+    .role-card-treasury_bank_admin:hover  { border-color: #6610f2 !important; }
     .role-icon-circle { width: 68px; height: 68px; border-radius: 50%; }
     .role-section-label {
         font-size: 0.7rem;
@@ -44,6 +47,7 @@
 </div>
 
 <!-- ── Submitter ───────────────────────────────────────────── -->
+{% if 'submitter' in available_roles %}
 <div class="row justify-content-center mb-1">
     <div class="col-12 text-center"><span class="role-section-label">Submitter</span></div>
 </div>
@@ -69,14 +73,17 @@
         </form>
     </div>
 </div>
+{% endif %}
 
 <!-- ── Approver Roles ──────────────────────────────────────── -->
+{% if 'sam' in available_roles or 'controller' in available_roles or 'vp' in available_roles or 'cfo' in available_roles %}
 <div class="row justify-content-center mb-1">
     <div class="col-12 text-center"><span class="role-section-label">Approver Roles</span></div>
 </div>
 <div class="row justify-content-center g-3 mb-4">
 
     <!-- SAM -->
+    {% if 'sam' in available_roles %}
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="sam">
@@ -97,8 +104,10 @@
             </button>
         </form>
     </div>
+    {% endif %}
 
     <!-- Controller -->
+    {% if 'controller' in available_roles %}
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="controller">
@@ -119,8 +128,10 @@
             </button>
         </form>
     </div>
+    {% endif %}
 
     <!-- VP -->
+    {% if 'vp' in available_roles %}
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="vp">
@@ -141,8 +152,10 @@
             </button>
         </form>
     </div>
+    {% endif %}
 
     <!-- CFO -->
+    {% if 'cfo' in available_roles %}
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="cfo">
@@ -163,14 +176,17 @@
             </button>
         </form>
     </div>
+    {% endif %}
 
 </div>
+{% endif %}
 
 <!-- ── Treasury ────────────────────────────────────────────── -->
+{% if 'treasury' in available_roles %}
 <div class="row justify-content-center mb-1">
     <div class="col-12 text-center"><span class="role-section-label">Treasury</span></div>
 </div>
-<div class="row justify-content-center g-4 pb-4">
+<div class="row justify-content-center g-4 mb-4">
     <div class="col-xl-3 col-md-5 col-sm-8">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="treasury">
@@ -193,16 +209,107 @@
         </form>
     </div>
 </div>
+{% endif %}
+
+<!-- ── Administration ──────────────────────────────────────── -->
+{% if 'business_admin' in available_roles or 'it_admin' in available_roles or 'treasury_bank_admin' in available_roles %}
+<div class="row justify-content-center mb-1">
+    <div class="col-12 text-center"><span class="role-section-label">Administration</span></div>
+</div>
+<div class="row justify-content-center g-3 pb-4">
+
+    {% if 'business_admin' in available_roles %}
+    <div class="col-xl-2 col-md-3 col-sm-6">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="business_admin">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-business_admin text-center p-0">
+                <div class="card-body p-3">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#e9ecef;">
+                        <i class="fas fa-user-shield fa-2x" style="color:#495057;"></i>
+                    </div>
+                    <h6 class="fw-bold mb-1">Business Admin</h6>
+                    <p class="text-muted" style="font-size:0.75rem;">
+                        Monitors queues, reassigns participants, maintains routing.
+                    </p>
+                </div>
+                <div class="card-footer border-0 text-white py-2 fw-semibold rounded-bottom" style="background:#495057;font-size:0.75rem;">
+                    Continue as Business Admin &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+    {% endif %}
+
+    {% if 'it_admin' in available_roles %}
+    <div class="col-xl-2 col-md-3 col-sm-6">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="it_admin">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-it_admin text-center p-0">
+                <div class="card-body p-3">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#e6f9fc;">
+                        <i class="fas fa-laptop-code fa-2x" style="color:#0dcaf0;"></i>
+                    </div>
+                    <h6 class="fw-bold mb-1">IT Admin</h6>
+                    <p class="text-muted" style="font-size:0.75rem;">
+                        Technical configuration and access support. No approval authority.
+                    </p>
+                </div>
+                <div class="card-footer border-0 text-dark py-2 fw-semibold rounded-bottom" style="background:#0dcaf0;font-size:0.75rem;">
+                    Continue as IT Admin &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+    {% endif %}
+
+    {% if 'treasury_bank_admin' in available_roles %}
+    <div class="col-xl-2 col-md-3 col-sm-6">
+        <form method="post" action="{{ url_for('role_select') }}" class="h-100">
+            <input type="hidden" name="role" value="treasury_bank_admin">
+            <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-treasury_bank_admin text-center p-0">
+                <div class="card-body p-3">
+                    <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
+                         style="background:#efe6fc;">
+                        <i class="fas fa-building-columns fa-2x" style="color:#6610f2;"></i>
+                    </div>
+                    <h6 class="fw-bold mb-1">Treasury Backup</h6>
+                    <p class="text-muted" style="font-size:0.75rem;">
+                        Bank-account maintenance backup. Not yet available in the app.
+                    </p>
+                </div>
+                <div class="card-footer border-0 text-white py-2 fw-semibold rounded-bottom" style="background:#6610f2;font-size:0.75rem;">
+                    Continue as Treasury Backup &nbsp;<i class="fas fa-arrow-right"></i>
+                </div>
+            </button>
+        </form>
+    </div>
+    {% endif %}
+
+</div>
+{% endif %}
 
 <!-- Development note -->
+{% if auth_source == 'dev' %}
 <div class="row justify-content-center pb-4">
     <div class="col-lg-7">
         <div class="alert alert-warning py-2 text-center small mb-0">
             <i class="fas fa-flask me-1"></i>
             <strong>Development authentication.</strong>
-            Role selection temporarily replaces real authentication. Access controls will be enforced via Azure AD.
+            Role selection temporarily replaces real authentication. Access controls will be enforced via Azure AD Easy Auth.
             &nbsp;[<code>AUTH</code>]&nbsp;[<code>RBAC</code>]
         </div>
     </div>
 </div>
+{% else %}
+<div class="row justify-content-center pb-4">
+    <div class="col-lg-7">
+        <div class="alert alert-info py-2 text-center small mb-0">
+            <i class="fas fa-shield-halved me-1"></i>
+            You are signed in via Azure. Choose which assigned role to act as for this session.
+        </div>
+    </div>
+</div>
+{% endif %}
 {% endblock %}
