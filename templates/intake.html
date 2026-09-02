@@ -9,7 +9,7 @@
         </h2>
         <p class="text-muted mb-0 small">
             Complete all sections. Fields marked <span class="text-danger fw-bold">*</span> are required.
-            &ensp;<span class="badge bg-warning text-dark"><i class="fas fa-flask me-1"></i>Demo — No real data submitted</span>
+
         </p>
     </div>
     <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-sm">
@@ -127,8 +127,17 @@
                                 <label class="form-label fw-semibold" for="prepared_by">
                                     Prepared By <span class="text-danger">*</span>
                                 </label>
+                                {% if users %}
+                                <select class="form-select" id="prepared_by" name="prepared_by_key" required>
+                                    <option value="">&#8212; Select User &#8212;</option>
+                                    {% for u in users %}
+                                    <option value="{{ u.user_key }}">{{ u.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
                                 <input type="text" class="form-control" id="prepared_by"
                                        name="prepared_by" placeholder="Full name" required>
+                                {% endif %}
                             </div>
 
                             <!-- Prepared Date -->
@@ -162,8 +171,17 @@
                                 <label class="form-label fw-semibold" for="approver">
                                     Approver <span class="text-danger">*</span>
                                 </label>
+                                {% if users %}
+                                <select class="form-select" id="approver" name="approver_key" required>
+                                    <option value="">&#8212; Select Approver &#8212;</option>
+                                    {% for u in users %}
+                                    <option value="{{ u.user_key }}">{{ u.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
                                 <input type="text" class="form-control" id="approver"
                                        name="approver" placeholder="Approver's full name" required>
+                                {% endif %}
                             </div>
 
                             <!-- Controller -->
@@ -171,8 +189,17 @@
                                 <label class="form-label fw-semibold" for="controller">
                                     Controller <span class="text-danger">*</span>
                                 </label>
+                                {% if users %}
+                                <select class="form-select" id="controller" name="controller_key" required>
+                                    <option value="">&#8212; Select Controller &#8212;</option>
+                                    {% for u in users %}
+                                    <option value="{{ u.user_key }}">{{ u.display_name }}</option>
+                                    {% endfor %}
+                                </select>
+                                {% else %}
                                 <input type="text" class="form-control" id="controller"
                                        name="controller" placeholder="Controller's full name" required>
+                                {% endif %}
                             </div>
 
                         </div><!-- /row -->
@@ -234,9 +261,8 @@
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="verbal_confirm_datetime">Verbal Confirmation Date / Time</label>
-                                <input type="text" class="form-control" id="verbal_confirm_datetime"
-                                       name="verbal_confirm_datetime"
-                                       placeholder="e.g. 2026-07-08 2:30 PM">
+                                <input type="datetime-local" class="form-control" id="verbal_confirm_datetime"
+                                       name="verbal_confirm_datetime">
                             </div>
 
                             <!-- AVS Score + Validation Evidence -->
@@ -310,11 +336,32 @@
                 </h2>
                 <div id="sectionC" class="accordion-collapse collapse show">
                     <div class="accordion-body pt-3">
-                        <div class="alert alert-warning small py-2 mb-3">
-                            <i class="fas fa-lock me-1"></i>
-                            <strong>Demo only</strong> — Do not enter real account or routing numbers in this prototype.
-                        </div>
+
                         <div class="row g-3">
+                            {% if bank_accounts %}
+                            {# DB mode: user types last 4 digits to filter registered bank accounts #}
+                            <div class="col-12 col-md-6">
+                                <label class="form-label fw-semibold" for="acct_last4">
+                                    Originating Account — Last 4 Digits <span class="text-danger">*</span>
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                                    <input type="text" class="form-control" id="acct_last4"
+                                           inputmode="numeric" maxlength="4" placeholder="e.g. 1234"
+                                           autocomplete="off" oninput="filterBankAccounts(this.value)">
+                                </div>
+                                <div id="bank-account-results" class="list-group mt-1" style="display:none;"></div>
+                                <div id="bank-account-selected"
+                                     class="alert alert-success d-flex align-items-center justify-content-between py-2 mt-2 mb-0 d-none">
+                                    <span><i class="fas fa-check-circle me-2"></i><span id="bank-account-selected-label"></span></span>
+                                    <button type="button" class="btn btn-sm btn-outline-success" onclick="clearBankSelection()">Change</button>
+                                </div>
+                                <input type="hidden" name="bank_account_key" id="bank_account_key">
+                                <input type="hidden" name="orig_bank_name" id="orig_bank_name_hidden">
+                                <input type="hidden" name="orig_account_name" id="orig_account_name_hidden">
+                            </div>
+                            {% else %}
+                            {# Fallback free-text fields when DB is unavailable #}
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="orig_bank_name">
                                     Originating Bank Name <span class="text-danger">*</span>
@@ -334,7 +381,7 @@
                                     Originating Account Number <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="orig_account_number"
-                                       name="orig_account_number" placeholder="Demo placeholder only"
+                                       name="orig_account_number" placeholder="Enter account number"
                                        autocomplete="off" required>
                             </div>
                             <div class="col-md-6">
@@ -342,9 +389,10 @@
                                     Originating Routing Number <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="orig_routing_number"
-                                       name="orig_routing_number" placeholder="Demo placeholder only"
+                                       name="orig_routing_number" placeholder="Enter routing number"
                                        autocomplete="off" required>
                             </div>
+                            {% endif %}
                             <div class="col-md-6">
                                 <label class="form-label" for="orig_bank_contact">Bank Contact (if applicable)</label>
                                 <input type="text" class="form-control" id="orig_bank_contact"
@@ -372,10 +420,6 @@
                 </h2>
                 <div id="sectionD" class="accordion-collapse collapse show">
                     <div class="accordion-body pt-3">
-                        <div class="alert alert-warning small py-2 mb-3">
-                            <i class="fas fa-lock me-1"></i>
-                            <strong>Demo only</strong> — Do not enter real account or routing numbers in this prototype.
-                        </div>
                         <div class="row g-3">
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_payee_name">
@@ -403,7 +447,7 @@
                                     Receiving Account Number <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="recv_account_number"
-                                       name="recv_account_number" placeholder="Demo placeholder only"
+                                       name="recv_account_number" placeholder="Enter account number"
                                        autocomplete="off" required>
                             </div>
                             <div class="col-md-6">
@@ -411,7 +455,7 @@
                                     Receiving Routing Number <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="recv_routing_number"
-                                       name="recv_routing_number" placeholder="Demo placeholder only"
+                                       name="recv_routing_number" placeholder="Enter routing number"
                                        autocomplete="off" required>
                             </div>
                             <div class="col-md-6">
@@ -615,8 +659,8 @@
                             <i class="fas fa-times me-1"></i>Cancel
                         </a>
                         <div class="ms-auto text-muted small">
-                            <i class="fas fa-flask me-1"></i>
-                            Submission saves to session memory only (demo).
+                            <i class="fas fa-database me-1"></i>
+                            Submission is written to the SQL database.
                         </div>
                     </div>
                 </div>
@@ -768,6 +812,11 @@
         const reqType = document.getElementById('request_type')?.value || '';
         const errors  = [];
 
+        // Section C — Originating bank account (DB mode only)
+        const bankKeyEl = document.getElementById('bank_account_key');
+        if (bankKeyEl && !bankKeyEl.value)
+            errors.push({ msg: '<strong>Originating Bank Account</strong> — type the last 4 digits and select an account.', section: 'sectionC' });
+
         // Section B — Validation Evidence
         const valEv = document.getElementById('file_validation_evidence');
         if (valEv && !valEv.files.length)
@@ -853,5 +902,59 @@
         const form = document.getElementById('intake-form');
         if (form) form.addEventListener('submit', validateAttachments);
     });
+
+    {% if bank_accounts %}
+    const BANK_ACCOUNTS = {{ bank_accounts | tojson }};
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function filterBankAccounts(val) {
+        const resultsEl = document.getElementById('bank-account-results');
+        resultsEl.innerHTML = '';
+        if (val.length < 4) { resultsEl.style.display = 'none'; return; }
+        const matches = BANK_ACCOUNTS.filter(a => a.account_last4 === val);
+        if (!matches.length) {
+            resultsEl.innerHTML = `<div class="list-group-item text-muted">No accounts found ending in ${escHtml(val)}</div>`;
+        } else {
+            resultsEl.innerHTML = matches.map(a =>
+                `<button type="button" class="list-group-item list-group-item-action"
+                    data-key="${a.bank_account_key}"
+                    data-bank="${escHtml(a.bank_name)}"
+                    data-title="${escHtml(a.account_title)}"
+                    data-last4="${escHtml(a.account_last4)}"
+                    onclick="selectBankAccount(this)">
+                    <strong>${escHtml(a.bank_name)}</strong> &mdash; ${escHtml(a.account_title)}
+                    <span class="text-muted ms-1">&hellip;${escHtml(a.account_last4)}</span>
+                </button>`
+            ).join('');
+        }
+        resultsEl.style.display = 'block';
+    }
+
+    function selectBankAccount(btn) {
+        document.getElementById('bank_account_key').value        = btn.dataset.key;
+        document.getElementById('orig_bank_name_hidden').value   = btn.dataset.bank;
+        document.getElementById('orig_account_name_hidden').value = btn.dataset.title;
+        document.getElementById('bank-account-results').style.display = 'none';
+        document.getElementById('bank-account-selected-label').textContent =
+            btn.dataset.bank + ' — ' + btn.dataset.title + ' (…' + btn.dataset.last4 + ')';
+        document.getElementById('bank-account-selected').classList.remove('d-none');
+        document.getElementById('acct_last4').disabled = true;
+    }
+
+    function clearBankSelection() {
+        document.getElementById('bank_account_key').value        = '';
+        document.getElementById('orig_bank_name_hidden').value   = '';
+        document.getElementById('orig_account_name_hidden').value = '';
+        document.getElementById('bank-account-selected').classList.add('d-none');
+        const last4 = document.getElementById('acct_last4');
+        last4.disabled = false;
+        last4.value = '';
+        document.getElementById('bank-account-results').style.display = 'none';
+        document.getElementById('bank-account-results').innerHTML = '';
+    }
+    {% endif %}
 </script>
 {% endblock %}

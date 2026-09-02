@@ -1,8 +1,8 @@
 /**
- * E-Transaction Approval Dashboard — Prototype JS
+ * E-Transaction Approval Dashboard — Application JS
  * =================================================
  * Client-side behavior for intake form, dashboard, and detail view.
- * No real API calls or data persistence — prototype only.
+ * Client-side behavior for the development application.
  */
 
 'use strict';
@@ -153,7 +153,7 @@ function toggleMask(fieldId) {
 function confirmAction(label, requestId) {
     return confirm(
         `Confirm action: "${label}" for request ${requestId}?\n\n` +
-        'This is a prototype — no real workflow will be triggered.'
+        'This is a development environment — workflow integration is still in progress.'
     );
 }
 

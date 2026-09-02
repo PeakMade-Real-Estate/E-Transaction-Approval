@@ -319,3 +319,223 @@ def get_request_detail(request_id: str):
     d["comments"] = comments
 
     return d
+
+
+# ─────────────────────────────────────────────────────────────
+#  Reference data helpers (used to populate form dropdowns)
+# ─────────────────────────────────────────────────────────────
+
+def get_user_list():
+    """Return all active AppUsers as a list of dicts for form dropdowns."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT User_Key, Display_Name FROM [etransactions].[AppUser] "
+            "WHERE Active_Status = 1 ORDER BY Display_Name"
+        )
+        return [{"user_key": r[0], "display_name": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_bank_accounts():
+    """Return all active company bank accounts for the originating-account dropdown."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT BankAccount_Key, BankName, AccountTitle, RIGHT(AccountNumber, 4) AS account_last4 "
+            "FROM [etransactions].[BankAccount] "
+            "WHERE Status = 'Active' ORDER BY AccountTitle"
+        )
+        return [{"bank_account_key": r[0], "bank_name": r[1], "account_title": r[2], "account_last4": r[3]}
+                for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ─────────────────────────────────────────────────────────────
+#  Write path — new transaction submission
+# ─────────────────────────────────────────────────────────────
+
+def insert_transaction(data: dict) -> str:
+    """
+    Insert all rows for a new transaction in a single transaction.
+    Inserts: Beneficiary, BeneficiaryBankInstruction, ETransaction,
+             TransactionVerification, WorkflowEvent (Submitted).
+    Returns the generated Request_ID.
+    """
+    from datetime import datetime as _dt
+    import random as _random
+
+    now   = _dt.now()
+    today = now.date()
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Look up the only/first active BusinessEntity
+        cur.execute(
+            "SELECT TOP 1 Entity_Key FROM [etransactions].[BusinessEntity] WHERE Active_Status = 1"
+        )
+        entity_key = cur.fetchone()[0]
+
+        # Look up ApprovalRule by amount thresholds
+        cur.execute(
+            "SELECT ApprovalRule_Key FROM [etransactions].[ApprovalRule] "
+            "WHERE Is_Active = 1 AND Min_Amount <= ? AND (Max_Amount IS NULL OR Max_Amount >= ?)",
+            [data["amount"], data["amount"]],
+        )
+        rule_row = cur.fetchone()
+        rule_key = rule_row[0] if rule_row else None
+
+        # Insert Beneficiary (payee)
+        cur.execute(
+            "INSERT INTO [etransactions].[Beneficiary] "
+            "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
+            "OUTPUT INSERTED.Beneficiary_Key VALUES (?, ?, ?, ?)",
+            [data["recv_payee_name"], data.get("recv_contact_name", ""),
+             data.get("recv_contact_email", ""), data.get("recv_contact_phone", "")],
+        )
+        ben_key = cur.fetchone()[0]
+
+        # Insert BeneficiaryBankInstruction (receiving bank)
+        cur.execute(
+            "INSERT INTO [etransactions].[BeneficiaryBankInstruction] "
+            "(Beneficiary_Key, Receiving_Bank_Name, Receiving_Account_Name, "
+            " Receiving_Account_Number, Receiving_Routing_Number, "
+            " Bank_Beneficiary_Address, Is_Current, Effective_From) "
+            "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+            [ben_key, data["recv_bank_name"], data["recv_account_name"],
+             data["recv_account_number"], data["recv_routing_number"],
+             data.get("recv_bank_address", ""), today],
+        )
+        bi_key = cur.fetchone()[0]
+
+        # Generate a unique Request_ID
+        request_id = None
+        for _ in range(10):
+            candidate = f"TXN-{now.year}-{_random.randint(1000, 9999)}"
+            cur.execute(
+                "SELECT 1 FROM [etransactions].[ETransaction] WHERE Request_ID = ?",
+                [candidate],
+            )
+            if not cur.fetchone():
+                request_id = candidate
+                break
+        if not request_id:
+            raise RuntimeError("Unable to generate a unique Request_ID.")
+
+        tier           = data["approval_tier"]
+        initial_status = data["status"]
+        requires_vp    = tier in ("Vice President", "Vice President + CFO")
+        requires_cfo   = tier == "Vice President + CFO"
+
+        # Insert ETransaction
+        cur.execute(
+            "INSERT INTO [etransactions].[ETransaction] ("
+            "  Request_ID, PreparedBy_User_Key,"
+            "  Entity_Key, Property_Department_Text, Entity_ID_Text,"
+            "  OriginatingBankAccount_Key, Beneficiary_Key, BeneficiaryInstruction_Key,"
+            "  SelectedApprover_User_Key, SelectedController_User_Key,"
+            "  VPApprover_User_Key, CFOApprover_User_Key,"
+            "  CurrentOwner_User_Key, BankReleaser_User_Key, ApprovalRule_Key,"
+            "  Request_Type, Treasury_Service_Date, Prepared_Date, Submitted_Date,"
+            "  Amount, Currency, Payment_Purpose,"
+            "  Urgent_Flag, Urgency_Reason,"
+            "  Current_Status, Current_Workflow_Stage,"
+            "  Approval_Tier_Snapshot, Requires_VP, Requires_CFO,"
+            "  Created_DateTime, Modified_DateTime"
+            ") OUTPUT INSERTED.Transaction_Key"
+            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                request_id,
+                data["prepared_by_key"],
+                entity_key,
+                data.get("property_dept", ""),
+                data.get("property_code", ""),
+                data["bank_account_key"],
+                ben_key,
+                bi_key,
+                data["approver_key"],
+                data["controller_key"],
+                None,   # VP — assigned during workflow routing
+                None,   # CFO — assigned during workflow routing
+                data["approver_key"],   # approver is the first current owner
+                None,   # bank releaser — set by treasury
+                rule_key,
+                data["request_type"],
+                data.get("treasury_service_date") or None,
+                data.get("prepared_date") or None,
+                now,
+                data["amount"],
+                data.get("currency", "USD"),
+                data.get("payment_purpose", ""),
+                1 if data.get("urgent") else 0,
+                data.get("urgency_reason", ""),
+                initial_status,
+                "Approver",
+                tier,
+                1 if requires_vp  else 0,
+                1 if requires_cfo else 0,
+                now,
+                now,
+            ],
+        )
+        txn_key = cur.fetchone()[0]
+
+        # Insert TransactionVerification
+        cur.execute(
+            "INSERT INTO [etransactions].[TransactionVerification] ("
+            "  Transaction_Key,"
+            "  Instructions_Previously_Used, Last_Used_Date,"
+            "  Verbal_Confirmed,"
+            "  Confirmed_With_KnownContact_Flag, Confirmed_With_Requester_Flag,"
+            "  Verbal_Contact_Name, Verbal_Confirm_DateTime,"
+            "  AVS_Score, External_Source_Flag, Internal_Doc_Not_Used_Flag,"
+            "  Verified_By_User_Key, Created_DateTime"
+            ") OUTPUT INSERTED.Verification_Key VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                txn_key,
+                1 if data.get("instructions_previously_used") else 0,
+                data.get("last_used_date") or None,
+                1 if data.get("verbal_confirmed") else 0,
+                1 if data.get("verbal_known_contact") else 0,
+                1 if data.get("verbal_requester") else 0,
+                data.get("verbal_contact_name", ""),
+                data.get("verbal_confirm_datetime") or None,
+                data.get("avs_score") or None,
+                1 if data.get("external_source") else 0,
+                1 if data.get("internal_doc_not_used") else 0,
+                data["prepared_by_key"],
+                now,
+            ],
+        )
+
+        # Insert WorkflowEvent — Submitted
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowEvent] ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason"
+            ") OUTPUT INSERTED.WorkflowEvent_Key VALUES (?,?,?,?,?,?,?,?,?)",
+            [
+                txn_key,
+                data["prepared_by_key"],
+                "Submitter",
+                "Submitted", "Submitted",
+                None, initial_status,
+                now, None,
+            ],
+        )
+
+        conn.commit()
+        return request_id
+
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()

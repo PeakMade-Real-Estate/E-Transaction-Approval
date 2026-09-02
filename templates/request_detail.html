@@ -192,6 +192,7 @@
                                     </div>
                                 </div>
                                 {% set attachments = record.get('attachments', {}) %}
+                                {% set attachment_urls = record.get('attachment_urls', {}) %}
                                 {% set docs = record.get('docs_checklist', {}) %}
                                 <div class="col-sm-4">
                                     <span class="section-label">AVS Validation Evidence</span>
@@ -211,7 +212,11 @@
                                     <div>
                                         {% if attachments.get('validation_evidence') %}
                                         <i class="fas fa-paperclip text-success me-1"></i>
+                                        {% if attachment_urls.get('validation_evidence') %}
+                                        <a href="{{ attachment_urls.validation_evidence }}" target="_blank" rel="noopener" class="text-success fw-semibold">{{ attachments.validation_evidence }}</a>
+                                        {% else %}
                                         <span class="text-success fw-semibold">{{ attachments.validation_evidence }}</span>
+                                        {% endif %}
                                         {% else %}
                                         <span class="badge bg-warning text-dark">Not attached</span>
                                         {% endif %}
@@ -233,7 +238,7 @@
                 <div class="alert alert-secondary py-1 px-2 mb-3 small">
                     <i class="fas fa-lock me-1"></i>
                     Account and routing numbers are masked by default.
-                    <strong>Demo only</strong> — reveal toggle shown for prototype UX demonstration.
+                    Reveal controls are available in this development environment.
                     {# [RBAC] TODO: Only show reveal option to authorized treasury roles #}
                 </div>
                 <div class="row g-3">
@@ -361,13 +366,18 @@
 
                     <!-- External ACH/Wire Instructions Attachment -->
                     {% set attachments = record.get('attachments', {}) %}
+                    {% set attachment_urls = record.get('attachment_urls', {}) %}
                     <div class="col-12">
                         <div class="card bg-light border-0 p-2">
                             <span class="section-label">External ACH/Wire Instructions</span>
                             <div class="mt-1">
                                 {% if attachments.get('wire_ach_instructions') %}
                                 <i class="fas fa-paperclip text-success me-1"></i>
+                                {% if attachment_urls.get('wire_ach_instructions') %}
+                                <a href="{{ attachment_urls.wire_ach_instructions }}" target="_blank" rel="noopener" class="text-success fw-semibold small">{{ attachments.wire_ach_instructions }}</a>
+                                {% else %}
                                 <span class="text-success fw-semibold small">{{ attachments.wire_ach_instructions }}</span>
+                                {% endif %}
                                 {% else %}
                                 <span class="badge bg-danger">Missing</span>
                                 {% endif %}
@@ -409,13 +419,18 @@
 
                     <!-- Payment Support Attachment -->
                     {% set attachments = record.get('attachments', {}) %}
+                    {% set attachment_urls = record.get('attachment_urls', {}) %}
                     <div class="col-12">
                         <div class="card bg-light border-0 p-2">
                             <span class="section-label">Payment Support</span>
                             <div class="mt-1">
                                 {% if attachments.get('payment_support') %}
                                 <i class="fas fa-paperclip text-success me-1"></i>
+                                {% if attachment_urls.get('payment_support') %}
+                                <a href="{{ attachment_urls.payment_support }}" target="_blank" rel="noopener" class="text-success fw-semibold small">{{ attachments.payment_support }}</a>
+                                {% else %}
                                 <span class="text-success fw-semibold small">{{ attachments.payment_support }}</span>
+                                {% endif %}
                                 {% else %}
                                 <span class="badge bg-danger">Missing</span>
                                 {% endif %}
@@ -437,11 +452,11 @@
                 <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
                     <i class="fas fa-tasks"></i>
                     <strong>Approval Actions</strong>
-                    <span class="badge bg-warning text-dark ms-auto small">Demo Only</span>
+                    <span class="badge bg-warning text-dark ms-auto small">Development</span>
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">
-                        Actions below update mock status only.
+                        Actions below update the development workflow state.
                         {# [WORKFLOW] TODO: Trigger real approval routing engine #}
                         {# [EMAIL]    TODO: Send notification email on status change #}
                         {# [AUDIT]    TODO: Write to immutable audit log #}
@@ -617,7 +632,13 @@
                         <li class="d-flex align-items-start gap-2 mb-2 small pb-2 {% if not loop.last %}border-bottom{% endif %}">
                             <i class="fas fa-file text-primary mt-1 flex-shrink-0"></i>
                             <div>
-                                <div class="fw-semibold">{{ att.filename }}</div>
+                                <div class="fw-semibold">
+                                    {% if att.get('web_url') %}
+                                    <a href="{{ att.web_url }}" target="_blank" rel="noopener">{{ att.filename }}</a>
+                                    {% else %}
+                                    {{ att.filename }}
+                                    {% endif %}
+                                </div>
                                 {% if att.description %}
                                 <div class="text-muted">{{ att.description }}</div>
                                 {% endif %}
@@ -651,18 +672,18 @@
                         </button>
                     </form>
                     <div class="text-muted mt-2" style="font-size:0.7rem;">
-                        <i class="fas fa-flask me-1"></i>Prototype: filenames recorded only. [<code>UPLOAD</code>]
+                        <i class="fas fa-paperclip me-1"></i>File persistence remains under development. [<code>UPLOAD</code>]
                     </div>
                 </div>
             </div>
 
-            <!-- ── Prototype Notice ──────────────────────────── -->
+            <!-- ── Development Notice ────────────────────────── -->
             <div class="card border-warning">
                 <div class="card-body py-2 d-flex align-items-start gap-2 small text-muted">
                     <i class="fas fa-flask text-warning mt-1 flex-shrink-0"></i>
                     <div>
-                        <strong>Demo only.</strong>
-                        Actions update session memory. Pre-loaded mock records cannot be permanently modified in this prototype.
+                        <strong>Development environment.</strong>
+                        Workflow actions are currently persisted only for session-backed records; SQL workflow writes remain under development.
                         {# [AUTH]    TODO: Restrict actions by user role #}
                         {# [STORAGE] TODO: Persist status changes to database #}
                     </div>

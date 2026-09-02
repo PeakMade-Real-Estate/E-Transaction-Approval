@@ -1,11 +1,11 @@
 # E-Transaction Approval Dashboard — Copilot Context Map
-**Last updated: 2026-08-03**
+**Last updated: 2026-09-02**
 > This file is a navigational reference for GitHub Copilot. Read it at the start of a new session to avoid re-exploring the project from scratch.
 
 ---
 
 ## Project Purpose
-Flask prototype (demo/requirements-gathering only) for a treasury e-transaction approval workflow. No real banking data is stored. All data lives in-memory via Flask `session` or in `mock_data.py`. The prototype is used to demonstrate UX and gather stakeholder requirements before building against real systems (SharePoint, Azure AD, etc.).
+Flask development application for a treasury e-transaction approval workflow. The primary data source is Microsoft Fabric SQL via `db.py`; mock records are available only when `MOCK_DATA_ENABLED=true`. Azure AD authentication, full workflow writes, notifications, audit logging, and file persistence remain active development work.
 
 **Run the app:** `python app.py` → http://127.0.0.1:5000  
 **Virtual env:** `.venv\Scripts\Activate.ps1`  
@@ -18,10 +18,12 @@ Flask prototype (demo/requirements-gathering only) for a treasury e-transaction 
 ```
 app.py                  ← Flask app: all routes, filters, session logic
 mock_data.py            ← Static mock records + helper functions
+db.py                   ← Fabric SQL data access (primary data source)
+sharepoint.py           ← SharePoint E Transaction Library access via Microsoft Graph (app-only auth)
 requirements.txt        ← pip dependencies
 
 templates/
-  base.html             ← Shared layout: navbar, prototype banner, Bootstrap/FA imports
+  base.html             ← Shared layout: navbar, development status, Bootstrap/FA imports
   role_select.html      ← Role picker landing page (Submitter / Approver / Treasury)
   dashboard.html        ← Approver dashboard (stat cards, filter bar, request table)
   intake.html           ← New request submission form (Sections A–E + JS validation)
@@ -184,8 +186,17 @@ These comment tags mark every future integration point throughout the codebase:
 
 ---
 
-## Session State
-The app stores submitted (non-mock) records in Flask `session["submitted_requests"]` as a list of dicts. This is ephemeral — cleared when the server restarts. Mock records in `MOCK_REQUESTS` are always present. Both lists are merged with `MOCK_REQUESTS + submitted` in `dashboard()` and `request_detail()`.
+## Data Source State
+SQL is enabled by default through `database_enabled()` and is the primary source for dashboard, detail, reference-data, and submission operations. Set `MOCK_DATA_ENABLED=true` to add the static records from `MOCK_REQUESTS` for local development. Session-backed records remain available only for the non-SQL submission path and are ephemeral.
+
+---
+
+## SharePoint Attachment Library
+File attachments are stored in the **E Transaction Library** SharePoint document library, one folder per request (folder name = `Request_ID`, e.g. `TXN-2026-0104/`). `sharepoint.py` connects via Microsoft Graph app-only auth using the existing `AZURE_CLIENT_ID` / `AZURE_TENANT_ID` / `AZURE_CLIENT_SECRET` credentials in `.env`, plus `SHAREPOINT_SITE_HOSTNAME`, `SHAREPOINT_SITE_PATH`, and `SHAREPOINT_LIBRARY_ID`. Controlled by `sharepoint_enabled()` (`SHAREPOINT_ENABLED`, default `true`).
+
+- **Write:** `sharepoint.upload_attachment()` uploads a file into the request's folder and sets the library's metadata columns (`TransactionRequestID`, `DocumentSection`, `DocumentType`, `UploadedByRole`, `DocumentStatus`, `IsRequiredDocument`, `SourceSystem`, `OriginalFileName`, `AttachmentCorrelationID`, `Description`). Called from `intake_submit()` for the three named Section B/D/E files, and from `request_attach()` for additional files (`DocumentSection = Additional`, `DocumentType = Other`).
+- **Read:** `sharepoint.list_attachments()` lists all files in a request's folder with their metadata. Called from `request_detail()`; results are merged into `display['attachments']` / `display['attachment_urls']` (matched by `DOC_TYPE_TO_ATTACHMENT_KEY`) and `display['extra_attachments']`, reusing the existing template bindings rather than requiring new ones.
+- Failures in either direction are caught and logged; they do not block the request flow.
 
 ---
 
@@ -231,10 +242,10 @@ The app stores submitted (non-mock) records in Flask `session["submitted_request
 
 ---
 
-## Known Prototype Limitations / Decisions
+## Current Development Limitations / Decisions
 - **No file storage:** File uploads record only the filename string. Actual file bytes are discarded. `[UPLOAD]` tag marks all such spots.
 - **No persistence:** All submitted records vanish on server restart. Mock data is hardcoded.
 - **No auth:** Any user can see all records and take any action. `[AUTH]` / `[RBAC]` tags mark gating points.
-- **Demo secret key:** Hardcoded in `app.py` — must be replaced with `os.environ.get('SECRET_KEY')` before any real deployment.
+- **Development secret key:** `app.py` retains a local fallback, but deployment must provide `SECRET_KEY`.
 - **Approval tier on mock records:** The `approval_tier` string is stored as a plain string, not recomputed from amount. New submissions recompute it via `get_approval_tier(amount)`.
-- **Status changes on mock records are not persisted** — `request_action()` only mutates `session["submitted_requests"]`. The app flashes an info message when an action targets a mock record.
+- **SQL status actions:** `request_action()` currently mutates only `session["submitted_requests"]`; SQL workflow writes remain under development.

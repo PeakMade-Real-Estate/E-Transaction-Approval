@@ -1,13 +1,11 @@
 """
-E-Transaction Approval Dashboard — Flask Prototype
+E-Transaction Approval Dashboard — Flask Application
 ====================================================
-PROTOTYPE / DEMO PURPOSES ONLY
-Not connected to real systems. No real banking data stored.
-For requirements-gathering and stakeholder demonstration only.
+Development application for the treasury e-transaction approval workflow.
 
 TODO (Future Integration Points):
   [AUTH]      Authentication / user roles (Azure AD / MSAL)
-  [STORAGE]   SharePoint list or SQL table (replace session-based mock data)
+    [STORAGE]   Extend the SQL persistence layer as additional workflow fields are implemented
   [UPLOAD]    Document storage (SharePoint Document Library / Azure Blob)
   [ESIGN]     E-signature integration (DocuSign / Adobe Sign)
   [EMAIL]     Email notifications (Microsoft Graph / SendGrid)
@@ -32,10 +30,53 @@ load_dotenv()  # loads .env into os.environ; no-op if file is absent
 
 from mock_data import MOCK_REQUESTS, get_approval_tier, tier_to_status, mask_account, mask_routing
 import db
+import sharepoint
 
 app = Flask(__name__)
 # [AUTH] TODO: Rotate this key before any real deployment
-app.secret_key = os.environ.get("SECRET_KEY") or "etxn-demo-prototype-2026-not-for-production"
+app.secret_key = os.environ.get("SECRET_KEY") or "etxn-development-key-change-before-deployment"
+
+
+def database_enabled():
+    """Return whether the SQL data source is enabled for this environment."""
+    return os.environ.get("DB_ENABLED", "true").lower() == "true"
+
+
+def mock_data_enabled():
+    """Return whether mock records are explicitly enabled for local development."""
+    return os.environ.get("MOCK_DATA_ENABLED", "false").lower() == "true"
+
+
+def sharepoint_enabled():
+    """Return whether the SharePoint attachment library is enabled for this environment."""
+    return os.environ.get("SHAREPOINT_ENABLED", "true").lower() == "true"
+
+
+# Maps the three named intake upload fields to their library section/document type
+_INTAKE_ATTACHMENT_FIELDS = {
+    "validation_evidence":   ("file_validation_evidence",   sharepoint.SECTION_VERIFICATION,      sharepoint.DOC_TYPE_VALIDATION_EVIDENCE,   False),
+    "wire_ach_instructions": ("file_wire_ach_instructions", sharepoint.SECTION_RECEIVING_BANKING,  sharepoint.DOC_TYPE_WIRE_ACH_INSTRUCTIONS, True),
+    "payment_support":       ("file_payment_support",       sharepoint.SECTION_TRANSACTION,        sharepoint.DOC_TYPE_PAYMENT_SUPPORT,       True),
+}
+
+
+def _upload_intake_attachments(request_id):
+    """Upload the Section B/D/E intake files to the SharePoint library, if enabled."""
+    if not sharepoint_enabled():
+        return
+    role = ROLE_DISPLAY.get(session.get("role"), "Submitter")
+    for field_name, section, doc_type, is_required in _INTAKE_ATTACHMENT_FIELDS.values():
+        file_storage = request.files.get(field_name)
+        if not file_storage or not file_storage.filename:
+            continue
+        try:
+            sharepoint.upload_attachment(
+                request_id, file_storage,
+                section=section, doc_type=doc_type,
+                uploaded_by_role=role, is_required=is_required,
+            )
+        except Exception:
+            app.logger.exception("SharePoint upload failed for %s on %s", field_name, request_id)
 
 # Display names used in timeline / comment author fields
 ROLE_DISPLAY = {
@@ -89,14 +130,14 @@ def yesno(value):
 @app.context_processor
 def inject_globals():
     return {
-        "is_prototype": True,
+        "is_prototype": False,
         "current_year": datetime.now().year,
         # [AUTH] TODO: Replace with Azure AD role claim from MSAL token
         "current_role": session.get("role"),
     }
 
 
-# [AUTH] Prototype-only role gate — replace with Azure AD / MSAL authentication
+# [AUTH] Development role gate — replace with Azure AD / MSAL authentication
 ROLE_FREE_ENDPOINTS = {"role_select", "switch_role", "static"}
 
 @app.before_request
@@ -120,7 +161,7 @@ def index():
 
 @app.route("/role-select", methods=["GET", "POST"])
 def role_select():
-    """Prototype role picker — simulates future Azure AD role assignment. [AUTH]"""
+    """Development role picker — simulates Azure AD role assignment. [AUTH]"""
     if request.method == "POST":
         role = request.form.get("role", "")
         if role in ("submitter", "sam", "controller", "vp", "cfo", "treasury"):
@@ -144,13 +185,22 @@ def intake():
     if session.get("role") == "treasury":
         flash("Treasury role does not submit payment requests.", "warning")
         return redirect(url_for("dashboard"))
-    return render_template("intake.html")
+    _db_on = database_enabled()
+    users         = []
+    bank_accounts = []
+    if _db_on:
+        try:
+            users         = db.get_user_list()
+            bank_accounts = db.get_bank_accounts()
+        except Exception:
+            pass
+    return render_template("intake.html", users=users, bank_accounts=bank_accounts)
 
 
 @app.route("/intake/submit", methods=["POST"])
 def intake_submit():
     """
-    Handle intake form submission (demo — stores in Flask session).
+    Handle intake form submission.
 
     [STORAGE]  TODO: Write record to SharePoint list or SQL table.
     [WORKFLOW] TODO: Trigger approval routing after submission.
@@ -224,11 +274,11 @@ def intake_submit():
         "verbal_confirmed":          frm.get("verbal_confirmed") == "on",
         "verbal_confirmed_with":     ", ".join(verbal_parts),
         "verbal_contact_name":       frm.get("verbal_contact_name", ""),
-        "verbal_confirm_datetime":   frm.get("verbal_confirm_datetime", ""),
+        "verbal_confirm_datetime":   frm.get("verbal_confirm_datetime", "").replace("T", " "),
         "avs_score":                 frm.get("avs_score", ""),
         "external_source":           frm.get("external_source") == "on",
         "internal_doc_not_used":     frm.get("internal_doc_not_used") == "on",
-        # Attachments (demo — filenames recorded; no files stored in prototype)
+        # Attachments currently record filenames; file persistence remains under development.
         # [UPLOAD] TODO: Store files in SharePoint Document Library or Azure Blob Storage
         "attachments": {
             "validation_evidence":   (request.files["file_validation_evidence"].filename
@@ -261,10 +311,58 @@ def intake_submit():
         "comments": [],
     }
 
-    # [STORAGE] TODO: Replace with database / SharePoint write
+    _db_on = database_enabled()
+    if _db_on:
+        try:
+            _vdt_raw = frm.get("verbal_confirm_datetime", "")
+            _vdt = (_vdt_raw.replace("T", " ") + ":00") if _vdt_raw else ""
+            db_data = {
+                "prepared_by_key":  int(frm.get("prepared_by_key", 0)),
+                "approver_key":     int(frm.get("approver_key", 0)),
+                "controller_key":   int(frm.get("controller_key", 0)),
+                "bank_account_key": int(frm.get("bank_account_key", 0)),
+                "request_type":          frm.get("request_type", ""),
+                "property_dept":         frm.get("property_dept", ""),
+                "property_code":         frm.get("entity_id", ""),
+                "treasury_service_date": frm.get("treasury_service_date", ""),
+                "prepared_date":         frm.get("prepared_date", ""),
+                "amount":                amount,
+                "currency":              frm.get("currency", "USD"),
+                "payment_purpose":       frm.get("payment_purpose", ""),
+                "approval_tier":         approval_tier,
+                "status":                tier_to_status(approval_tier),
+                "urgent":                frm.get("urgent") == "yes",
+                "urgency_reason":        frm.get("urgency_reason", ""),
+                "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
+                "last_used_date":        frm.get("last_used_date", ""),
+                "verbal_confirmed":      frm.get("verbal_confirmed") == "on",
+                "verbal_known_contact":  frm.get("verbal_confirmed_with_known") == "on",
+                "verbal_requester":      frm.get("verbal_confirmed_with_requester") == "on",
+                "verbal_contact_name":   frm.get("verbal_contact_name", ""),
+                "verbal_confirm_datetime": _vdt,
+                "avs_score":             frm.get("avs_score", ""),
+                "external_source":       frm.get("external_source") == "on",
+                "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
+                "recv_payee_name":       frm.get("recv_payee_name", ""),
+                "recv_bank_name":        frm.get("recv_bank_name", ""),
+                "recv_account_name":     frm.get("recv_account_name", ""),
+                "recv_account_number":   frm.get("recv_account_number", ""),
+                "recv_routing_number":   frm.get("recv_routing_number", ""),
+                "recv_bank_address":     frm.get("recv_bank_address", ""),
+                "recv_contact_name":     frm.get("recv_contact_name", ""),
+                "recv_contact_email":    frm.get("recv_contact_email", ""),
+                "recv_contact_phone":    frm.get("recv_contact_phone", ""),
+            }
+            request_id = db.insert_transaction(db_data)
+            _upload_intake_attachments(request_id)
+            return redirect(url_for("confirmation", request_id=request_id))
+        except Exception as e:
+            flash(f"Database error — submission saved locally only. ({e})", "danger")
+
     submitted = session.get("submitted_requests", [])
     submitted.append(record)
     session["submitted_requests"] = submitted
+    _upload_intake_attachments(request_id)
 
     return redirect(url_for("confirmation", request_id=request_id))
 
@@ -276,6 +374,12 @@ def confirmation(request_id):
     record = next((r for r in submitted if r["request_id"] == request_id), None)
     if not record:
         record = next((r for r in MOCK_REQUESTS if r["request_id"] == request_id), None)
+    _db_on = database_enabled()
+    if record is None and _db_on:
+        try:
+            record = db.get_request_detail(request_id)
+        except Exception:
+            pass
     return render_template("confirmation.html", record=record, request_id=request_id)
 
 
@@ -290,12 +394,15 @@ def dashboard():
     submitted = session.get("submitted_requests", [])
     role      = session.get("role")
 
-    # [STORAGE] Set DB_ENABLED=true in .env when the database is ready
-    _db_on = os.environ.get("DB_ENABLED", "false").lower() == "true"
+    _db_on = database_enabled()
     try:
-        db_records = db.get_dashboard_records() if _db_on else list(MOCK_REQUESTS)
+        db_records = db.get_dashboard_records() if _db_on else []
     except Exception:
-        db_records = list(MOCK_REQUESTS)
+        app.logger.exception("Unable to load dashboard records from the database")
+        db_records = []
+
+    if mock_data_enabled():
+        db_records = list(MOCK_REQUESTS) + db_records
 
     all_requests = db_records + submitted
 
@@ -393,7 +500,7 @@ def request_detail(request_id):
     [AUDIT] TODO: Log each access to sensitive banking data.
     """
     record = None
-    _db_on = os.environ.get("DB_ENABLED", "false").lower() == "true"
+    _db_on = database_enabled()
     if _db_on:
         try:
             record = db.get_request_detail(request_id)
@@ -415,6 +522,35 @@ def request_detail(request_id):
     display["orig_routing_number_masked"]  = mask_routing(record.get("orig_routing_number", ""))
     display["recv_account_number_masked"]  = mask_account(record.get("recv_account_number", ""))
     display["recv_routing_number_masked"]  = mask_routing(record.get("recv_routing_number", ""))
+
+    if sharepoint_enabled():
+        try:
+            sp_items = sharepoint.list_attachments(request_id)
+        except Exception:
+            app.logger.exception("Unable to load SharePoint attachments for %s", request_id)
+            sp_items = []
+
+        attachments       = dict(display.get("attachments") or {})
+        attachment_urls   = {}
+        extra_attachments = list(display.get("extra_attachments") or [])
+
+        for item in sp_items:
+            key = sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item["doc_type"])
+            if key:
+                attachments[key]     = item["filename"]
+                attachment_urls[key] = item["web_url"]
+            else:
+                extra_attachments.append({
+                    "filename":    item["filename"],
+                    "description": item.get("description", ""),
+                    "uploaded_by": item.get("uploaded_by_role", ""),
+                    "date":        item.get("uploaded_date", "")[:10],
+                    "web_url":     item.get("web_url", ""),
+                })
+
+        display["attachments"]       = attachments
+        display["attachment_urls"]   = attachment_urls
+        display["extra_attachments"] = extra_attachments
 
     return render_template("request_detail.html", record=display)
 
@@ -526,7 +662,7 @@ def request_action(request_id):
     else:
         flash(
             f"Note: {request_id} is pre-loaded mock data. "
-            "Status changes for mock records are not persisted in this prototype.",
+            "Status changes for mock records are not persisted unless mock data is explicitly enabled.",
             "info",
         )
 
@@ -550,8 +686,22 @@ def request_attach(request_id):
         return redirect(url_for("request_detail", request_id=request_id))
 
     role     = session.get("role", "demo")
-    uploader = role.capitalize()
+    uploader = ROLE_DISPLAY.get(role, role.capitalize())
     today    = datetime.now().strftime("%Y-%m-%d")
+
+    if sharepoint_enabled():
+        for file_storage in uploaded_files:
+            if not file_storage.filename:
+                continue
+            try:
+                sharepoint.upload_attachment(
+                    request_id, file_storage,
+                    section=sharepoint.SECTION_ADDITIONAL, doc_type=sharepoint.DOC_TYPE_OTHER,
+                    uploaded_by_role=uploader, description=description,
+                )
+            except Exception:
+                app.logger.exception("SharePoint upload failed for extra_files on %s", request_id)
+                flash("One or more files could not be uploaded to SharePoint.", "danger")
 
     new_entries = [
         {"filename": fn, "description": description, "uploaded_by": uploader, "date": today}
@@ -575,7 +725,7 @@ def request_attach(request_id):
     else:
         flash(
             f"Note: {request_id} is pre-loaded mock data. "
-            "Attachments cannot be persisted for mock records in this prototype.",
+            "Attachments cannot be persisted for mock records unless mock data is explicitly enabled.",
             "info",
         )
 
