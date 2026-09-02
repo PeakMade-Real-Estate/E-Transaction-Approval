@@ -33,10 +33,16 @@ TABLES = (
 
 def get_connection():
     """
-    Return an open mssql_python connection using Entra Interactive (MFA) auth.
-    Caller is responsible for closing the connection.
+    Return an open mssql_python connection using Entra ID auth.
 
-    [STORAGE] TODO: Replace Authentication value with 'ActiveDirectoryMsi' for Azure deployment.
+    Authentication=ActiveDirectoryDefault resolves via azure-identity's
+    DefaultAzureCredential, which picks up AZURE_CLIENT_ID/AZURE_TENANT_ID/
+    AZURE_CLIENT_SECRET from the environment (EnvironmentCredential) both
+    locally and in Azure App Service — no interactive/browser auth required.
+    The corresponding Entra app registration must be granted access on the
+    Fabric SQL database (a Fabric-side grant, not an App Service setting).
+
+    Caller is responsible for closing the connection.
     """
     server   = os.environ.get("DB_SERVER", "")
     database = os.environ.get("DB_NAME", "")
@@ -49,7 +55,7 @@ def get_connection():
     conn_str = (
         f"SERVER={server};"
         f"DATABASE={database};"
-        f"Authentication=ActiveDirectoryInteractive;"
+        f"Authentication=ActiveDirectoryDefault;"
         f"Encrypt=yes;"
         f"TrustServerCertificate=no;"
     )
