@@ -85,14 +85,14 @@ def authorize_action(*, role: str, user_key, txn: dict, action: str) -> None:
         raise UnauthorizedActionError(f"This transaction is {status.lower()} and no longer accepts actions.")
 
     if action == ACTION_CANCEL:
-        if role not in ("submitter", "sam", "controller"):
+        if role not in ("submitter", "sam", "controller", "treasury"):
             raise UnauthorizedActionError("Your role cannot cancel this transaction.")
         if status not in CANCEL_ELIGIBLE_STATUSES:
             raise UnauthorizedActionError("This transaction can no longer be cancelled at its current stage.")
         if user_key is not None:
             if role == "submitter" and user_key != txn.get("prepared_by_user_key"):
                 raise UnauthorizedActionError("Only the original requester can cancel their own request.")
-            if role == "sam" and user_key != txn.get("selected_approver_user_key"):
+            if role in ("sam", "treasury") and user_key != txn.get("selected_approver_user_key"):
                 raise UnauthorizedActionError("You are not the assigned Approver for this transaction.")
             if role == "controller" and user_key != txn.get("selected_controller_user_key"):
                 raise UnauthorizedActionError("You are not the assigned Controller for this transaction.")
@@ -108,17 +108,19 @@ def authorize_action(*, role: str, user_key, txn: dict, action: str) -> None:
         return
 
     if action in (ACTION_APPROVE, ACTION_MORE_INFO):
+        # Treasury Manager may also act as the assigned Approver (confirmed org
+        # requirement) — accepted alongside sam at the Pending Approver stage.
         stage_map = {
-            STATUS_PENDING_APPROVER:   ("sam", "selected_approver_user_key"),
-            STATUS_PENDING_CONTROLLER: ("controller", "selected_controller_user_key"),
-            STATUS_PENDING_VP:         ("vp", "vp_approver_user_key"),
-            STATUS_PENDING_CFO:        ("cfo", "cfo_approver_user_key"),
+            STATUS_PENDING_APPROVER:   (("sam", "treasury"), "selected_approver_user_key"),
+            STATUS_PENDING_CONTROLLER: (("controller",), "selected_controller_user_key"),
+            STATUS_PENDING_VP:         (("vp",), "vp_approver_user_key"),
+            STATUS_PENDING_CFO:        (("cfo",), "cfo_approver_user_key"),
         }
         expected = stage_map.get(status)
         if not expected:
             raise UnauthorizedActionError("This transaction is not awaiting an approval action right now.")
-        expected_role, assignee_field = expected
-        if role != expected_role:
+        expected_roles, assignee_field = expected
+        if role not in expected_roles:
             raise UnauthorizedActionError("Your role is not authorized to act at this stage.")
         if user_key is not None and user_key != txn.get(assignee_field):
             raise UnauthorizedActionError("You are not the assigned participant for this stage.")

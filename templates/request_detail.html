@@ -486,7 +486,7 @@
                                                 workflow.STATUS_TREASURY_RELEASED) %}
                         {# ══ Current workflow vocabulary (SQL-backed transactions) ══ #}
 
-                        {% if (current_role == 'sam' and record.status == workflow.STATUS_PENDING_APPROVER) or
+                        {% if ((current_role == 'sam' or current_role == 'treasury') and record.status == workflow.STATUS_PENDING_APPROVER) or
                               (current_role == 'controller' and record.status == workflow.STATUS_PENDING_CONTROLLER) %}
                             <button type="submit" name="action" value="approve"
                                     class="btn btn-success btn-sm"
@@ -782,6 +782,7 @@
 </div><!-- /row -->
 
 {% if (current_role == 'sam' and record.status in ('Pending SAM Approval', workflow.STATUS_PENDING_APPROVER)) or
+      (current_role == 'treasury' and record.status == workflow.STATUS_PENDING_APPROVER) or
       (current_role == 'controller' and record.status in ('Pending Controller Approval', workflow.STATUS_PENDING_CONTROLLER)) or
       (current_role == 'vp' and record.status == 'Pending VP Approval') or
       (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
@@ -835,7 +836,7 @@
 </div>
 {% endif %}
 
-{% if current_role in ('submitter', 'sam', 'controller') %}
+{% if current_role in ('submitter', 'sam', 'controller', 'treasury') %}
 <!-- ── Cancel Transaction Modal ─────────────────────── -->
 <div class="modal fade" id="cancelModal" tabindex="-1" aria-labelledby="cancelModalLabel" aria-hidden="true">
     <div class="modal-dialog">
