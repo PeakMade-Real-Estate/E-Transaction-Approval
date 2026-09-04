@@ -478,6 +478,91 @@
                         <!-- Action buttons — role + status gated -->
                         <div class="d-grid gap-2">
 
+                        {% if record.get('entity_classification') is not none and record.get('entity_classification') != '' or
+                              record.status in (workflow.STATUS_PENDING_APPROVER, workflow.STATUS_PENDING_CONTROLLER,
+                                                workflow.STATUS_PENDING_VP, workflow.STATUS_PENDING_CFO,
+                                                workflow.STATUS_MORE_INFO, workflow.STATUS_READY_FOR_TREASURY,
+                                                workflow.STATUS_TREASURY_INITIATED, workflow.STATUS_AWAITING_RELEASE,
+                                                workflow.STATUS_TREASURY_RELEASED) %}
+                        {# ══ Current workflow vocabulary (SQL-backed transactions) ══ #}
+
+                        {% if (current_role == 'sam' and record.status == workflow.STATUS_PENDING_APPROVER) or
+                              (current_role == 'controller' and record.status == workflow.STATUS_PENDING_CONTROLLER) %}
+                            <button type="submit" name="action" value="approve"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Approve', '{{ record.request_id }}')">
+                                <i class="fas fa-check me-1"></i>Approve
+                            </button>
+                            <button type="button" class="btn btn-warning btn-sm text-dark"
+                                    data-bs-toggle="modal" data-bs-target="#rfiModal">
+                                <i class="fas fa-question-circle me-1"></i>Request More Information
+                            </button>
+                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#cancelModal">
+                                <i class="fas fa-ban me-1"></i>Cancel Transaction
+                            </button>
+
+                        {% elif (current_role == 'vp' and record.status == workflow.STATUS_PENDING_VP) or
+                                (current_role == 'cfo' and record.status == workflow.STATUS_PENDING_CFO) %}
+                            <button type="submit" name="action" value="approve"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Approve', '{{ record.request_id }}')">
+                                <i class="fas fa-check me-1"></i>Approve
+                            </button>
+
+                        {% elif current_role == 'treasury' and record.status == workflow.STATUS_READY_FOR_TREASURY %}
+                            {% if record.entity_classification | lower == 'property' %}
+                            <button type="submit" name="action" value="treasury_initiated"
+                                    class="btn btn-info btn-sm text-white"
+                                    onclick="return confirmAction('Treasury Initiated', '{{ record.request_id }}')">
+                                <i class="fas fa-paper-plane me-1"></i>Treasury Initiated
+                            </button>
+                            {% else %}
+                            <button type="submit" name="action" value="treasury_released"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Treasury Released', '{{ record.request_id }}')">
+                                <i class="fas fa-check-double me-1"></i>Treasury Released
+                            </button>
+                            {% endif %}
+
+                        {% elif current_role == 'treasury' and record.status == workflow.STATUS_TREASURY_RELEASED %}
+                            <button type="submit" name="action" value="mark_completed"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Mark as Completed', '{{ record.request_id }}')">
+                                <i class="fas fa-check-double me-1"></i>Mark as Completed
+                            </button>
+
+                        {% elif current_role in ('controller', 'vp') and record.status == workflow.STATUS_AWAITING_RELEASE %}
+                            <button type="submit" name="action" value="bank_release"
+                                    class="btn btn-success btn-sm"
+                                    onclick="return confirmAction('Complete Bank Release', '{{ record.request_id }}')">
+                                <i class="fas fa-university me-1"></i>Complete Bank Release
+                            </button>
+
+                        {% elif current_role == 'submitter' and record.status in (workflow.STATUS_PENDING_APPROVER,
+                              workflow.STATUS_PENDING_CONTROLLER, workflow.STATUS_PENDING_VP,
+                              workflow.STATUS_PENDING_CFO, workflow.STATUS_MORE_INFO) %}
+                            {% if record.status == workflow.STATUS_MORE_INFO %}
+                            <button type="submit" name="action" value="requester_respond"
+                                    class="btn btn-primary btn-sm"
+                                    onclick="return confirmAction('Resubmit with Additional Information', '{{ record.request_id }}')">
+                                <i class="fas fa-reply me-1"></i>Resubmit with Additional Info
+                            </button>
+                            {% endif %}
+                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#cancelModal">
+                                <i class="fas fa-ban me-1"></i>Cancel Transaction
+                            </button>
+
+                        {% else %}
+                        <div class="alert alert-secondary small py-2 mb-0 text-center">
+                            <i class="fas fa-info-circle me-1"></i>No actions available for your role at this stage.
+                        </div>
+                        {% endif %}
+
+                        {% else %}
+                        {# ══ Legacy mock/session vocabulary (unchanged) ══ #}
+
                         {# ── Approver-tier actions (same buttons, different status gate) ── #}
                         {% if (current_role == 'sam' and record.status == 'Pending SAM Approval') or
                               (current_role == 'controller' and record.status == 'Pending Controller Approval') or
@@ -493,11 +578,12 @@
                                     data-bs-toggle="modal" data-bs-target="#rfiModal">
                                 <i class="fas fa-question-circle me-1"></i>Request More Information
                             </button>
-                            <button type="submit" name="action" value="reject"
-                                    class="btn btn-outline-danger btn-sm"
-                                    onclick="return confirmAction('Reject', '{{ record.request_id }}')">
-                                <i class="fas fa-times me-1"></i>Reject
+                            {% if current_role in ('sam', 'controller') %}
+                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#cancelModal">
+                                <i class="fas fa-ban me-1"></i>Cancel Transaction
                             </button>
+                            {% endif %}
 
                         {# ── Treasury actions ── #}
                         {% elif current_role == 'treasury' %}
@@ -528,17 +614,16 @@
                         {# ── Submitter actions ── #}
                         {% elif current_role == 'submitter' %}
                             {% if record.status == 'Needs More Information' %}
-                            <button type="submit" name="action" value="resubmit"
+                            <button type="submit" name="action" value="requester_respond"
                                     class="btn btn-primary btn-sm"
                                     onclick="return confirmAction('Resubmit with Additional Information', '{{ record.request_id }}')">
                                 <i class="fas fa-reply me-1"></i>Resubmit with Additional Info
                             </button>
                             {% endif %}
                             {% if record.status in ('Submitted', 'Pending SAM Approval', 'Needs More Information') %}
-                            <button type="submit" name="action" value="cancel"
-                                    class="btn btn-outline-danger btn-sm"
-                                    onclick="return confirmAction('Cancel this Request', '{{ record.request_id }}')">
-                                <i class="fas fa-ban me-1"></i>Cancel Request
+                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#cancelModal">
+                                <i class="fas fa-ban me-1"></i>Cancel Transaction
                             </button>
                             {% else %}
                             <div class="alert alert-secondary small py-2 mb-0 text-center">
@@ -551,6 +636,7 @@
                         <div class="alert alert-secondary small py-2 mb-0 text-center">
                             <i class="fas fa-info-circle me-1"></i>No actions available for your role at this stage.
                         </div>
+                        {% endif %}
                         {% endif %}
 
                         </div>
@@ -695,8 +781,8 @@
 
 </div><!-- /row -->
 
-{% if (current_role == 'sam' and record.status == 'Pending SAM Approval') or
-      (current_role == 'controller' and record.status == 'Pending Controller Approval') or
+{% if (current_role == 'sam' and record.status in ('Pending SAM Approval', workflow.STATUS_PENDING_APPROVER)) or
+      (current_role == 'controller' and record.status in ('Pending Controller Approval', workflow.STATUS_PENDING_CONTROLLER)) or
       (current_role == 'vp' and record.status == 'Pending VP Approval') or
       (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
 <!-- ── Request More Information Modal ──────────────── -->
@@ -741,6 +827,61 @@
                     </button>
                     <button type="submit" class="btn btn-warning text-dark btn-sm" id="rfi-submit-btn">
                         <i class="fas fa-paper-plane me-1"></i>Submit Request
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if current_role in ('submitter', 'sam', 'controller') %}
+<!-- ── Cancel Transaction Modal ─────────────────────── -->
+<div class="modal fade" id="cancelModal" tabindex="-1" aria-labelledby="cancelModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="cancel-form" method="POST"
+                  action="{{ url_for('request_action', request_id=record.request_id) }}" novalidate>
+                <input type="hidden" name="action" value="cancel">
+                <div class="modal-header bg-danger">
+                    <h5 class="modal-title fw-bold text-white" id="cancelModalLabel">
+                        <i class="fas fa-ban me-2"></i>Cancel Transaction
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3 mb-3 small">
+                        <div class="col-sm-6">
+                            <span class="section-label">Transaction</span>
+                            <div class="fw-semibold">{{ record.request_id }}</div>
+                        </div>
+                        <div class="col-sm-6">
+                            <span class="section-label">Requester</span>
+                            <div class="fw-semibold">{{ record.prepared_by or '—' }}</div>
+                        </div>
+                    </div>
+                    <div class="alert alert-warning small py-2">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                        This permanently closes the active workflow. It cannot be undone from this page.
+                    </div>
+                    <label class="form-label fw-semibold" for="cancel-reason">
+                        Cancellation Reason <span class="text-danger">*</span>
+                    </label>
+                    <textarea class="form-control" id="cancel-reason" name="comment" rows="4"
+                              aria-describedby="cancel-reason-help cancel-reason-error" required></textarea>
+                    <div id="cancel-reason-help" class="form-text">
+                        Explain why this transaction is no longer needed.
+                    </div>
+                    <div id="cancel-reason-error" class="text-danger small mt-1" style="display:none;">
+                        Please provide a cancellation reason.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal" id="cancel-cancel-btn">
+                        Cancel
+                    </button>
+                    <button type="submit" class="btn btn-danger btn-sm" id="cancel-submit-btn">
+                        <i class="fas fa-ban me-1"></i>Confirm Cancellation
                     </button>
                 </div>
             </form>
@@ -797,6 +938,51 @@ document.addEventListener('DOMContentLoaded', function () {
         rfiError.style.display = 'none';
         setRfiSubmitting(true);
         // Full-page submit proceeds from here (same pattern as every other action on this page).
+    });
+});
+
+// ── Cancel Transaction Modal ─────────────────────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+    const cancelModalEl = document.getElementById('cancelModal');
+    if (!cancelModalEl) return;
+
+    const cancelForm      = document.getElementById('cancel-form');
+    const cancelReason    = document.getElementById('cancel-reason');
+    const cancelError     = document.getElementById('cancel-reason-error');
+    const cancelSubmitBtn = document.getElementById('cancel-submit-btn');
+    const cancelCancelBtn = document.getElementById('cancel-cancel-btn');
+
+    function setCancelSubmitting(isSubmitting) {
+        cancelSubmitBtn.disabled = isSubmitting;
+        cancelCancelBtn.disabled = isSubmitting;
+        cancelSubmitBtn.innerHTML = isSubmitting
+            ? '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Submitting...'
+            : '<i class="fas fa-ban me-1"></i>Confirm Cancellation';
+    }
+
+    cancelModalEl.addEventListener('shown.bs.modal', function () {
+        cancelReason.focus();
+    });
+
+    cancelModalEl.addEventListener('hidden.bs.modal', function () {
+        cancelForm.reset();
+        cancelReason.classList.remove('is-invalid');
+        cancelError.style.display = 'none';
+        setCancelSubmitting(false);
+    });
+
+    cancelForm.addEventListener('submit', function (e) {
+        const value = cancelReason.value.trim();
+        if (!value) {
+            e.preventDefault();
+            cancelReason.classList.add('is-invalid');
+            cancelError.style.display = 'block';
+            cancelReason.focus();
+            return;
+        }
+        cancelReason.classList.remove('is-invalid');
+        cancelError.style.display = 'none';
+        setCancelSubmitting(true);
     });
 });
 </script>

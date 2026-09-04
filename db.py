@@ -13,6 +13,8 @@ import struct
 import pyodbc
 from azure.identity import ClientSecretCredential
 
+from workflow import STATUS_PENDING_APPROVER
+
 # Fixed schema — all app tables live under etransactions
 DB_SCHEMA = "etransactions"
 
@@ -143,6 +145,181 @@ def table(name: str) -> str:
     return f"[{DB_SCHEMA}].[{name}]"
 
 
+class WorkflowConflictError(Exception):
+    """Raised when a transaction's status no longer matches the expected from_status
+    at the moment of update — i.e. the action was already processed (double-click,
+    retry, or a concurrent request)."""
+
+
+def get_app_user_by_entra_object_id(entra_object_id: str):
+    """Resolve the signed-in Easy Auth identity to an AppUser row, or None if not found."""
+    if not entra_object_id:
+        return None
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT User_Key, Display_Name, Email FROM etransactions.AppUser "
+            "WHERE Entra_Object_ID = ? AND Active_Status = 1",
+            [entra_object_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"user_key": row[0], "display_name": row[1], "email": row[2]}
+    finally:
+        conn.close()
+
+
+def get_transaction_for_workflow(request_id: str):
+    """
+    Lean fetch of the raw key/flag columns needed for workflow decisions (no
+    display-name joins — see get_request_detail() for the display-oriented fetch).
+    Returns None if the request is not found.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT
+                t.Transaction_Key, t.Request_ID, t.Current_Status,
+                t.PreparedBy_User_Key, t.SelectedApprover_User_Key, t.SelectedController_User_Key,
+                t.VPApprover_User_Key, t.CFOApprover_User_Key, t.CurrentOwner_User_Key,
+                t.BankReleaser_User_Key, t.Requires_VP, t.Requires_CFO, t.Amount,
+                ISNULL(be.Classification, '') AS Entity_Classification
+            FROM etransactions.ETransaction t
+            LEFT JOIN etransactions.BusinessEntity be ON be.Entity_Key = t.Entity_Key
+            WHERE t.Request_ID = ?
+            """,
+            [request_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [c[0] for c in cur.description]
+        d = dict(zip(cols, row))
+    finally:
+        conn.close()
+
+    return {
+        "transaction_key":              d["Transaction_Key"],
+        "request_id":                   d["Request_ID"],
+        "status":                       d["Current_Status"],
+        "prepared_by_user_key":         d["PreparedBy_User_Key"],
+        "selected_approver_user_key":   d["SelectedApprover_User_Key"],
+        "selected_controller_user_key": d["SelectedController_User_Key"],
+        "vp_approver_user_key":         d["VPApprover_User_Key"],
+        "cfo_approver_user_key":        d["CFOApprover_User_Key"],
+        "current_owner_user_key":       d["CurrentOwner_User_Key"],
+        "bank_releaser_user_key":       d["BankReleaser_User_Key"],
+        "requires_vp":                  bool(d["Requires_VP"]),
+        "requires_cfo":                 bool(d["Requires_CFO"]),
+        "amount":                       float(d["Amount"] or 0),
+        "entity_classification":        d["Entity_Classification"],
+    }
+
+
+def get_last_rfi_origin_status(transaction_key):
+    """Return the From_Status of the most recent RequestMoreInfo WorkflowEvent, or None."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT TOP (1) From_Status
+            FROM etransactions.WorkflowEvent
+            WHERE Transaction_Key = ? AND Event_Type = 'RequestMoreInfo'
+            ORDER BY Event_DateTime DESC
+            """,
+            [transaction_key],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def advance_transaction_workflow(
+    transaction_key, *, from_status, new_status, new_owner_user_key,
+    actor_user_key, actor_role, event_type, decision, workflow_role=None,
+    comments=None, bank_releaser_user_key=None,
+):
+    """
+    Atomically advance a transaction's workflow state:
+      1. Update ETransaction.Current_Status/CurrentOwner_User_Key, conditioned on
+         the expected from_status (optimistic concurrency — guards against
+         double-click/retry/duplicate processing).
+      2. Insert a WorkflowEvent row (permanent audit history).
+      3. Close out the prior current WorkflowAssignment and insert a new one for
+         the new owner, preserving assignment history.
+
+    Raises WorkflowConflictError if the transaction's status no longer matches
+    from_status (already advanced by another request) — no rows are written.
+    """
+    from datetime import datetime as _dt
+    now = _dt.now()
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        set_clauses = ["Current_Status = ?", "CurrentOwner_User_Key = ?", "Modified_DateTime = ?"]
+        params = [new_status, new_owner_user_key, now]
+        if bank_releaser_user_key is not None:
+            set_clauses.append("BankReleaser_User_Key = ?")
+            params.append(bank_releaser_user_key)
+        params.extend([transaction_key, from_status])
+
+        cur.execute(
+            f"UPDATE etransactions.ETransaction SET {', '.join(set_clauses)} "
+            "WHERE Transaction_Key = ? AND Current_Status = ?",
+            params,
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            raise WorkflowConflictError(
+                "This transaction has already moved past the expected status; action not applied."
+            )
+
+        cur.execute(
+            "INSERT INTO etransactions.WorkflowEvent ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason"
+            ") VALUES (?,?,?,?,?,?,?,?,?)",
+            [transaction_key, actor_user_key, actor_role, event_type, decision,
+             from_status, new_status, now, comments],
+        )
+
+        # Close out the prior current assignment regardless; only insert a new
+        # one when there is a specific new owner (queue-based stages have none).
+        cur.execute(
+            "UPDATE etransactions.WorkflowAssignment SET Is_Current = 0, End_DateTime = ? "
+            "WHERE Transaction_Key = ? AND Is_Current = 1",
+            [now, transaction_key],
+        )
+        if new_owner_user_key is not None and workflow_role is not None:
+            cur.execute(
+                "INSERT INTO etransactions.WorkflowAssignment ("
+                "  Transaction_Key, Workflow_Role, Assigned_User_Key,"
+                "  Assigned_By_User_Key, Assignment_Source,"
+                "  Assigned_DateTime, Is_Current"
+                ") VALUES (?,?,?,?,?,?,1)",
+                [transaction_key, workflow_role, new_owner_user_key,
+                 actor_user_key, "Workflow", now],
+            )
+
+        conn.commit()
+    except WorkflowConflictError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ─────────────────────────────────────────────────────────────
 #  Query helpers
 # ─────────────────────────────────────────────────────────────
@@ -263,7 +440,10 @@ SELECT
     ISNULL(v.External_Source_Flag,         0)      AS external_source,
     ISNULL(v.Internal_Doc_Not_Used_Flag,   0)      AS internal_doc_not_used,
     ISNULL(v.Instructions_Previously_Used, 0)      AS instructions_previously_used,
-    v.Last_Used_Date                               AS last_used_date
+    v.Last_Used_Date                               AS last_used_date,
+    ISNULL(be.Classification, '')                   AS entity_classification,
+    t.CurrentOwner_User_Key                         AS current_owner_user_key,
+    t.BankReleaser_User_Key                          AS bank_releaser_user_key
 FROM [etransactions].[ETransaction] t
 LEFT JOIN [etransactions].[AppUser] prep   ON prep.User_Key  = t.PreparedBy_User_Key
 LEFT JOIN [etransactions].[AppUser] owner  ON owner.User_Key = t.CurrentOwner_User_Key
@@ -279,6 +459,8 @@ LEFT JOIN [etransactions].[BeneficiaryBankInstruction] bi
       ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
 LEFT JOIN [etransactions].[TransactionVerification] v
       ON v.Transaction_Key = t.Transaction_Key
+LEFT JOIN [etransactions].[BusinessEntity] be
+      ON be.Entity_Key = t.Entity_Key
 WHERE t.Request_ID = ?
 """
 
@@ -511,7 +693,10 @@ def insert_transaction(data: dict) -> str:
             raise RuntimeError("Unable to generate a unique Request_ID.")
 
         tier           = data["approval_tier"]
-        initial_status = data["status"]
+        # Every transaction starts at Pending Approver regardless of tier — the
+        # tier only determines which LATER stages (VP/CFO) are additionally
+        # required. See workflow.py for the full additive routing model.
+        initial_status = STATUS_PENDING_APPROVER
         requires_vp    = tier in ("Vice President", "Vice President + CFO")
         requires_cfo   = tier == "Vice President + CFO"
 

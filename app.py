@@ -32,10 +32,12 @@ from mock_data import MOCK_REQUESTS, get_approval_tier, tier_to_status, mask_acc
 import db
 import sharepoint
 import auth
+import workflow
 
 app = Flask(__name__)
 # [AUTH] TODO: Rotate this key before any real deployment
 app.secret_key = os.environ.get("SECRET_KEY") or "etxn-development-key-change-before-deployment"
+app.jinja_env.globals["workflow"] = workflow  # lets templates reference workflow.STATUS_* directly
 
 
 def database_enabled():
@@ -51,6 +53,26 @@ def mock_data_enabled():
 def sharepoint_enabled():
     """Return whether the SharePoint attachment library is enabled for this environment."""
     return os.environ.get("SHAREPOINT_ENABLED", "true").lower() == "true"
+
+
+def current_app_user_key():
+    """
+    Resolve the signed-in identity to an etransactions.AppUser.User_Key, or None.
+
+    Only possible when signed in via Easy Auth (a real Entra Object ID is known).
+    In local dev mode there is no real identity to resolve, so assignment-specific
+    authorization checks in workflow.py are relaxed to role-only in that case —
+    see workflow.authorize_action().
+    """
+    identity = auth.current_identity()
+    if identity["source"] != "easy_auth" or not database_enabled():
+        return None
+    try:
+        app_user = db.get_app_user_by_entra_object_id(identity["user_id"])
+    except Exception:
+        app.logger.exception("Unable to resolve signed-in identity to an AppUser")
+        return None
+    return app_user["user_key"] if app_user else None
 
 
 # Maps the three named intake upload fields to their library section/document type
@@ -110,6 +132,17 @@ STATUS_BADGE_MAP = {
     "Rejected":                     "bg-danger",
     "Needs More Information":       "bg-warning text-dark",
     "Cancelled":                    "bg-secondary",
+    # Current workflow vocabulary (workflow.py) — kept alongside the legacy
+    # strings above so pre-existing mock/session demo records still render.
+    "Pending Approver":             "bg-info text-dark",
+    "Pending Controller":           "bg-warning text-dark",
+    "Pending VP":                   "badge-orange",
+    "Pending CFO":                  "bg-danger",
+    "More Information Requested":   "bg-warning text-dark",
+    "Ready for Treasury":           "bg-primary",
+    "Treasury Initiated":           "badge-purple",
+    "Awaiting Bank Release":        "badge-purple",
+    "Treasury Released":            "badge-teal",
 }
 
 
@@ -283,8 +316,9 @@ def intake_submit():
         "amount":                amount,
         "currency":              frm.get("currency", "USD"),
         "approval_tier":         approval_tier,
-        # [WORKFLOW] Auto-routed to the correct approval tier on submission
-        "status":                tier_to_status(approval_tier),
+        # Every transaction starts at Pending Approver; tier only determines
+        # later VP/CFO requirements (see workflow.py for the additive routing model).
+        "status":                workflow.STATUS_PENDING_APPROVER,
         "urgent":                frm.get("urgent") == "yes",
         "urgency_reason":        frm.get("urgency_reason", ""),
         "payment_purpose":       frm.get("payment_purpose", ""),
@@ -341,9 +375,9 @@ def intake_submit():
             },
             {
                 "date":   datetime.now().strftime("%Y-%m-%d"),
-                "event":  f"Routed for {approval_tier} Approval",
+                "event":  "Routed to Approver",
                 "actor":  "System",
-                "status": tier_to_status(approval_tier),
+                "status": workflow.STATUS_PENDING_APPROVER,
                 "type":   "routed",
             },
         ],
@@ -369,7 +403,7 @@ def intake_submit():
                 "currency":              frm.get("currency", "USD"),
                 "payment_purpose":       frm.get("payment_purpose", ""),
                 "approval_tier":         approval_tier,
-                "status":                tier_to_status(approval_tier),
+                "status":                workflow.STATUS_PENDING_APPROVER,
                 "urgent":                frm.get("urgent") == "yes",
                 "urgency_reason":        frm.get("urgency_reason", ""),
                 "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
@@ -597,12 +631,99 @@ def request_detail(request_id):
 @app.route("/dashboard/request/<request_id>/action", methods=["POST"])
 def request_action(request_id):
     """
-    Process approval actions (demo — updates session data only).
+    Process a workflow action. SQL-backed transactions are routed through the
+    centralized workflow engine (workflow.py + db.advance_transaction_workflow),
+    which performs real server-side authorization, ownership routing, and audit
+    history. Session/mock records (no real AppUser keys to authorize against)
+    keep their existing simplified session-based behavior.
 
-    [WORKFLOW] TODO: Trigger real approval workflow engine.
-    [EMAIL]    TODO: Send status-change notification email.
-    [AUDIT]    TODO: Write action to immutable audit log.
-    [ESIGN]    TODO: Trigger e-signature flow if required.
+    [EMAIL] Not implemented here — Power Automate reacts to the Status/
+            CurrentOwner_User_Key/WorkflowEvent values this route writes.
+    """
+    if database_enabled():
+        try:
+            txn = db.get_transaction_for_workflow(request_id)
+        except Exception:
+            app.logger.exception("Unable to load transaction %s for workflow action", request_id)
+            txn = None
+        if txn is not None:
+            return _handle_sql_workflow_action(request_id, txn)
+
+    return _handle_legacy_session_action(request_id)
+
+
+def _handle_sql_workflow_action(request_id, txn):
+    """Authorize and apply a workflow action against a SQL-backed transaction."""
+    action  = request.form.get("action", "")
+    comment = request.form.get("comment", "").strip()
+    role    = session.get("role")
+    user_key = current_app_user_key()
+
+    action_labels = {
+        workflow.ACTION_APPROVE:            ("Approved", "success"),
+        workflow.ACTION_MORE_INFO:          ("Returned \u2013 More Information Needed", "warning"),
+        workflow.ACTION_CANCEL:             ("Cancelled", "secondary"),
+        workflow.ACTION_REQUESTER_RESPOND:  ("Resubmitted with Additional Information", "info"),
+        workflow.ACTION_TREASURY_INITIATED: ("Treasury Initiated", "info"),
+        workflow.ACTION_TREASURY_RELEASED:  ("Treasury Released", "success"),
+        workflow.ACTION_BANK_RELEASE:       ("Bank Release Completed", "success"),
+        workflow.ACTION_MARK_COMPLETED:     ("Marked Completed", "success"),
+    }
+    if action not in action_labels:
+        flash("Unknown action.", "danger")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    if action == workflow.ACTION_CANCEL and not comment:
+        flash("A cancellation reason is required.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    try:
+        workflow.authorize_action(role=role, user_key=user_key, txn=txn, action=action)
+
+        if action == workflow.ACTION_REQUESTER_RESPOND:
+            txn["rfi_origin_status"] = db.get_last_rfi_origin_status(txn["transaction_key"])
+
+        new_status, new_owner, owner_role, satisfied = workflow.determine_next_step(txn, action)
+        label, cat = action_labels[action]
+
+        if satisfied and len(satisfied) > 1:
+            note = f"One approval satisfied: {', '.join(satisfied)} (same employee)."
+            comment = f"{comment} {note}".strip() if comment else note
+
+        db.advance_transaction_workflow(
+            txn["transaction_key"],
+            from_status=txn["status"],
+            new_status=new_status,
+            new_owner_user_key=new_owner,
+            actor_user_key=user_key,
+            actor_role=ROLE_DISPLAY.get(role, role or "Unknown"),
+            event_type=action,
+            decision=label,
+            workflow_role=owner_role,
+            comments=comment or None,
+            bank_releaser_user_key=new_owner if action == workflow.ACTION_TREASURY_INITIATED else None,
+        )
+        flash(f"Action recorded: <strong>{label}</strong> for {request_id}.", cat)
+
+    except workflow.UnauthorizedActionError as exc:
+        flash(str(exc), "warning")
+    except workflow.WorkflowConfigurationError as exc:
+        app.logger.error("Workflow configuration error for %s: %s", request_id, exc)
+        flash(str(exc), "danger")
+    except db.WorkflowConflictError:
+        flash("This action was already processed for this transaction.", "info")
+    except Exception:
+        app.logger.exception("Workflow action failed for %s", request_id)
+        flash("Unable to process this action. Please try again.", "danger")
+
+    return redirect(url_for("request_detail", request_id=request_id))
+
+
+def _handle_legacy_session_action(request_id):
+    """
+    Simplified role+status action handling for session/mock records, which have
+    no real AppUser keys to authorize an assignment against. Preserved as-is for
+    local demo/mock use; SQL-backed transactions never reach this path.
     """
     action  = request.form.get("action", "")
     comment = request.form.get("comment", "").strip()
@@ -610,16 +731,15 @@ def request_action(request_id):
 
     action_map = {
         "approve":           ("Pending Treasury Review",   "Approved",                           "success"),
-        "reject":            ("Rejected",                  "Rejected",                           "danger"),
+        "cancel":            ("Cancelled",                 "Cancelled",                          "secondary"),
         "more_info":         ("Needs More Information",    "Returned \u2013 More Information Needed", "warning"),
-        "cancel":            ("Cancelled",                 "Cancelled by Submitter",              "secondary"),
         "treasury_reviewed": ("Pending Release",           "Marked as Treasury Reviewed",         "info"),
         "mark_released":     ("Released",                  "Marked as Released",                  "success"),
         "mark_completed":    ("Completed",                 "Marked as Completed",                 "success"),
     }
 
-    # resubmit target status is computed from the record's tier, so handled separately
-    if action not in action_map and action != "resubmit":
+    # requester_respond (resubmit) target status is computed from the record's tier, so handled separately
+    if action not in action_map and action not in ("resubmit", "requester_respond"):
         flash("Unknown action.", "danger")
         return redirect(url_for("request_detail", request_id=request_id))
 
@@ -629,31 +749,37 @@ def request_action(request_id):
     record_ref   = next((r for r in all_requests if r["request_id"] == request_id), None)
     cur_status   = record_ref["status"] if record_ref else ""
 
-    # [RBAC] Role+status authorization — simulates permission gates that Azure AD will enforce
+    if action == "cancel" and not comment:
+        flash("A cancellation reason is required.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    # [RBAC] Role+status authorization — simulates permission gates that Azure AD will enforce.
+    # Accepts both the legacy status strings (static MOCK_REQUESTS) and the
+    # current workflow.py vocabulary (newly submitted session records).
     ALLOWED: dict[str, dict[str, bool]] = {
         "submitter": {
-            "cancel":   cur_status in ("Submitted", "Pending SAM Approval", "Needs More Information"),
-            "resubmit": cur_status == "Needs More Information",
+            "cancel":   cur_status in ("Submitted", "Pending SAM Approval", "Needs More Information",
+                                        workflow.STATUS_PENDING_APPROVER, workflow.STATUS_MORE_INFO),
+            "resubmit":          cur_status in ("Needs More Information", workflow.STATUS_MORE_INFO),
+            "requester_respond": cur_status in ("Needs More Information", workflow.STATUS_MORE_INFO),
         },
         "sam": {
-            "approve":   cur_status == "Pending SAM Approval",
-            "reject":    cur_status == "Pending SAM Approval",
-            "more_info": cur_status == "Pending SAM Approval",
+            "approve":   cur_status in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER),
+            "cancel":    cur_status in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER),
+            "more_info": cur_status in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER),
         },
         "controller": {
-            "approve":   cur_status == "Pending Controller Approval",
-            "reject":    cur_status == "Pending Controller Approval",
-            "more_info": cur_status == "Pending Controller Approval",
+            "approve":   cur_status in ("Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER),
+            "cancel":    cur_status in ("Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER),
+            "more_info": cur_status in ("Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER),
         },
         "vp": {
-            "approve":   cur_status == "Pending VP Approval",
-            "reject":    cur_status == "Pending VP Approval",
-            "more_info": cur_status == "Pending VP Approval",
+            "approve":   cur_status in ("Pending VP Approval", workflow.STATUS_PENDING_VP),
+            "more_info": cur_status in ("Pending VP Approval", workflow.STATUS_PENDING_VP),
         },
         "cfo": {
-            "approve":   cur_status == "Pending CFO Approval",
-            "reject":    cur_status == "Pending CFO Approval",
-            "more_info": cur_status == "Pending CFO Approval",
+            "approve":   cur_status in ("Pending CFO Approval", workflow.STATUS_PENDING_CFO),
+            "more_info": cur_status in ("Pending CFO Approval", workflow.STATUS_PENDING_CFO),
         },
         "treasury": {
             "treasury_reviewed": cur_status == "Pending Treasury Review",
@@ -666,7 +792,7 @@ def request_action(request_id):
         return redirect(url_for("request_detail", request_id=request_id))
 
     # Resolve new status and message
-    if action == "resubmit":
+    if action in ("resubmit", "requester_respond"):
         tier       = record_ref.get("approval_tier", "") if record_ref else ""
         new_status = tier_to_status(tier)
         label      = "Resubmitted with Additional Information"
