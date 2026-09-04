@@ -18,7 +18,7 @@ TODO (Future Integration Points):
 
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, flash,
+    redirect, url_for, session, flash, jsonify,
 )
 from datetime import datetime
 import copy
@@ -769,6 +769,25 @@ def request_attach(request_id):
         )
 
     return redirect(url_for("request_detail", request_id=request_id))
+
+
+# Temporary diagnostic endpoint — reuses the existing business_admin/it_admin role
+# codes as the authorization gate; no separate admin system is introduced.
+# [STORAGE] Remove once Fabric SQL connectivity has been verified in Azure.
+@app.route("/admin/database-test")
+def admin_database_test():
+    if session.get("role") not in ("business_admin", "it_admin"):
+        return jsonify({"status": "error", "message": "Not authorized."}), 403
+    try:
+        db.test_connection()
+        return jsonify({
+            "status": "success",
+            "database": "connected",
+            "table": "etransactions.ETransaction",
+        })
+    except Exception:
+        app.logger.exception("Admin database connectivity test failed")
+        return jsonify({"status": "error", "message": "Database connection failed."}), 500
 
 
 if __name__ == "__main__":

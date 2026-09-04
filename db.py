@@ -1,12 +1,17 @@
 """
-Database connection module — Microsoft Fabric SQL endpoint via Entra ID.
+Database connection module — Microsoft Fabric SQL Database via Entra ID service principal.
 
-[STORAGE] TODO: Switch authentication to 'ActiveDirectoryMsi' when deployed to Azure App Service
-                so no credentials are needed in the environment at all.
+Authenticates as the "E-Transaction Approval" service principal (AZURE_CLIENT_ID /
+AZURE_TENANT_ID / AZURE_CLIENT_SECRET), scoped to the `etransactions` schema only.
+No SQL username/password is used. Tokens and connections are acquired lazily —
+nothing here runs at import time.
 """
 
 import os
-import mssql_python
+import struct
+
+import pyodbc
+from azure.identity import ClientSecretCredential
 
 # Fixed schema — all app tables live under etransactions
 DB_SCHEMA = "etransactions"
@@ -30,36 +35,107 @@ TABLES = (
     "WorkflowEvent",
 )
 
+# ODBC connection-attribute key for supplying an Entra access token (SQL_COPT_SS_ACCESS_TOKEN)
+_SQL_COPT_SS_ACCESS_TOKEN = 1256
+_SQL_TOKEN_SCOPE = "https://database.windows.net/.default"
+
+_credential = None  # lazily created; ClientSecretCredential itself makes no network call
+
+
+def _get_credential() -> ClientSecretCredential:
+    """Return (and cache) the service-principal credential used for SQL token acquisition."""
+    global _credential
+    if _credential is None:
+        try:
+            _credential = ClientSecretCredential(
+                tenant_id=os.environ["AZURE_TENANT_ID"],
+                client_id=os.environ["AZURE_CLIENT_ID"],
+                client_secret=os.environ["AZURE_CLIENT_SECRET"],
+            )
+        except KeyError as exc:
+            raise RuntimeError(
+                f"Missing required environment variable for SQL authentication: {exc}"
+            ) from None
+    return _credential
+
 
 def get_connection():
     """
-    Return an open mssql_python connection using Entra ID auth.
-
-    Authentication=ActiveDirectoryDefault resolves via azure-identity's
-    DefaultAzureCredential, which picks up AZURE_CLIENT_ID/AZURE_TENANT_ID/
-    AZURE_CLIENT_SECRET from the environment (EnvironmentCredential) both
-    locally and in Azure App Service — no interactive/browser auth required.
-    The corresponding Entra app registration must be granted access on the
-    Fabric SQL database (a Fabric-side grant, not an App Service setting).
+    Return an open pyodbc connection to the Fabric SQL Database, authenticated as the
+    E-Transaction Approval service principal via Microsoft Entra ID.
 
     Caller is responsible for closing the connection.
     """
     server   = os.environ.get("DB_SERVER", "")
     database = os.environ.get("DB_NAME", "")
-
     if not server or not database:
         raise RuntimeError(
-            "DB_SERVER and DB_NAME must be set in .env before connecting."
+            "DB_SERVER and DB_NAME must be set in the environment before connecting."
         )
 
+    try:
+        token = _get_credential().get_token(_SQL_TOKEN_SCOPE)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to acquire an Entra ID access token: {exc}") from exc
+
+    token_bytes  = token.token.encode("utf-16-le")
+    token_struct = struct.pack(f"<I{len(token_bytes)}s", len(token_bytes), token_bytes)
+
     conn_str = (
+        "DRIVER={ODBC Driver 18 for SQL Server};"
         f"SERVER={server};"
         f"DATABASE={database};"
-        f"Authentication=ActiveDirectoryDefault;"
-        f"Encrypt=yes;"
-        f"TrustServerCertificate=no;"
+        "Encrypt=yes;"
+        "TrustServerCertificate=no;"
     )
-    return mssql_python.connect(conn_str)
+
+    try:
+        return pyodbc.connect(
+            conn_str,
+            attrs_before={_SQL_COPT_SS_ACCESS_TOKEN: token_struct},
+            timeout=120,
+        )
+    except pyodbc.Error as exc:
+        raise RuntimeError(f"Failed to connect to the Fabric SQL Database: {exc}") from exc
+
+
+def test_connection() -> bool:
+    """
+    Read-only connectivity check for the deployed environment. Confirms token
+    acquisition, ODBC Driver 18 availability, DB_SERVER/DB_NAME reachability, and
+    SELECT permission on etransactions.ETransaction. Returns True on success and
+    raises on any failure. Never returns or logs the row contents.
+    """
+    connection = get_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            "SELECT TOP (1) Transaction_Key FROM etransactions.ETransaction ORDER BY Transaction_Key"
+        )
+        cursor.fetchone()  # existence/permission check only — value intentionally discarded
+        return True
+    finally:
+        connection.close()
+
+
+def test_permission_boundary_negative() -> bool:
+    """
+    One-time manual security validation — NOT for startup or health checks.
+    Confirms the service principal is scoped to `etransactions` only by querying a
+    table outside that schema, which is EXPECTED TO FAIL with a permission error.
+    Returns True if access was correctly denied, False if the query unexpectedly succeeded.
+    """
+    connection = get_connection()
+    try:
+        cursor = connection.cursor()
+        cursor.execute("SELECT TOP (1) * FROM riskgate.user_identity")
+        cursor.fetchone()
+        return False  # unexpected — this should have raised a permission error
+    except pyodbc.Error:
+        return True  # expected outcome: permission denied outside etransactions
+    finally:
+        connection.close()
+
 
 
 def table(name: str) -> str:
