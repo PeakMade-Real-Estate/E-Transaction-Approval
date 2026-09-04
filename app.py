@@ -145,6 +145,26 @@ STATUS_BADGE_MAP = {
     "Treasury Released":            "badge-teal",
 }
 
+# Groups legacy and current status strings that represent the same workflow
+# stage, so dashboard status-filter links/bookmarks work regardless of which
+# vocabulary a given record actually stores.
+_STATUS_EQUIVALENTS = {
+    "Pending SAM Approval":        {"Pending SAM Approval", workflow.STATUS_PENDING_APPROVER},
+    workflow.STATUS_PENDING_APPROVER:   {"Pending SAM Approval", workflow.STATUS_PENDING_APPROVER},
+    "Pending Controller Approval": {"Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER},
+    workflow.STATUS_PENDING_CONTROLLER: {"Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER},
+    "Pending VP Approval":         {"Pending VP Approval", workflow.STATUS_PENDING_VP},
+    workflow.STATUS_PENDING_VP:         {"Pending VP Approval", workflow.STATUS_PENDING_VP},
+    "Pending CFO Approval":        {"Pending CFO Approval", workflow.STATUS_PENDING_CFO},
+    workflow.STATUS_PENDING_CFO:        {"Pending CFO Approval", workflow.STATUS_PENDING_CFO},
+    "Pending Treasury Review":     {"Pending Treasury Review", workflow.STATUS_READY_FOR_TREASURY},
+    workflow.STATUS_READY_FOR_TREASURY: {"Pending Treasury Review", workflow.STATUS_READY_FOR_TREASURY},
+    "Pending Release":             {"Pending Release", workflow.STATUS_AWAITING_RELEASE},
+    workflow.STATUS_AWAITING_RELEASE:   {"Pending Release", workflow.STATUS_AWAITING_RELEASE},
+    "Needs More Information":      {"Needs More Information", workflow.STATUS_MORE_INFO},
+    workflow.STATUS_MORE_INFO:          {"Needs More Information", workflow.STATUS_MORE_INFO},
+}
+
 
 @app.template_filter("status_badge_class")
 def status_badge_class(status):
@@ -479,27 +499,29 @@ def dashboard():
 
     all_requests = db_records + submitted
 
-    # [AUTH] Role-based scoping — replace with real RBAC when Azure AD is integrated
+    # [AUTH] Role-based scoping — replace with real RBAC when Azure AD is integrated.
+    # Accepts both the legacy status strings (static MOCK_REQUESTS) and the
+    # current workflow.py vocabulary (SQL-backed transactions).
     if role == "submitter":
         scoped = list(submitted)
     elif role == "sam":
-        scoped = [r for r in all_requests if r["status"] == "Pending SAM Approval"]
+        scoped = [r for r in all_requests if r["status"] in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER)]
     elif role == "controller":
-        scoped = [r for r in all_requests if r["status"] == "Pending Controller Approval"]
+        scoped = [r for r in all_requests if r["status"] in ("Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER)]
     else:  # vp, cfo, treasury — full visibility
         scoped = list(all_requests)
 
     stats = {
         "total":              len(scoped),
-        "pending_sam":        sum(1 for r in scoped if r["status"] == "Pending SAM Approval"),
-        "pending_controller": sum(1 for r in scoped if r["status"] == "Pending Controller Approval"),
-        "pending_vp":         sum(1 for r in scoped if r["status"] == "Pending VP Approval"),
-        "pending_cfo":        sum(1 for r in scoped if r["status"] == "Pending CFO Approval"),
-        "pending_treasury":   sum(1 for r in scoped if r["status"] == "Pending Treasury Review"),
-        "pending_release":    sum(1 for r in scoped if r["status"] == "Pending Release"),
-        "completed":          sum(1 for r in scoped if r["status"] in ("Completed", "Released")),
-        "needs_more_info":    sum(1 for r in scoped if r["status"] == "Needs More Information"),
-        "rejected":           sum(1 for r in scoped if r["status"] == "Rejected"),
+        "pending_sam":        sum(1 for r in scoped if r["status"] in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER)),
+        "pending_controller": sum(1 for r in scoped if r["status"] in ("Pending Controller Approval", workflow.STATUS_PENDING_CONTROLLER)),
+        "pending_vp":         sum(1 for r in scoped if r["status"] in ("Pending VP Approval", workflow.STATUS_PENDING_VP)),
+        "pending_cfo":        sum(1 for r in scoped if r["status"] in ("Pending CFO Approval", workflow.STATUS_PENDING_CFO)),
+        "pending_treasury":   sum(1 for r in scoped if r["status"] in ("Pending Treasury Review", workflow.STATUS_READY_FOR_TREASURY)),
+        "pending_release":    sum(1 for r in scoped if r["status"] in ("Pending Release", workflow.STATUS_AWAITING_RELEASE)),
+        "completed":          sum(1 for r in scoped if r["status"] in ("Completed", "Released", workflow.STATUS_TREASURY_RELEASED, workflow.STATUS_COMPLETED)),
+        "needs_more_info":    sum(1 for r in scoped if r["status"] in ("Needs More Information", workflow.STATUS_MORE_INFO)),
+        "rejected":           sum(1 for r in scoped if r["status"] in ("Rejected", workflow.STATUS_CANCELLED)),
         "urgent":             sum(1 for r in scoped if r.get("urgent", False)),
         "over_1m":            sum(1 for r in scoped if r.get("amount", 0) > 1_000_000),
     }
@@ -515,7 +537,10 @@ def dashboard():
 
     filtered = list(scoped)
     if f_status:
-        filtered = [r for r in filtered if r["status"] == f_status]
+        # Legacy and current vocabulary strings represent the same stage — treat
+        # links/bookmarks using either as equivalent when filtering.
+        status_group = _STATUS_EQUIVALENTS.get(f_status, {f_status})
+        filtered = [r for r in filtered if r["status"] in status_group]
     if f_type:
         filtered = [r for r in filtered if r["request_type"] == f_type]
     if f_property:
