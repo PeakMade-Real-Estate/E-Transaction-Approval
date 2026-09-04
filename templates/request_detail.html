@@ -488,9 +488,9 @@
                                     onclick="return confirmAction('Approve', '{{ record.request_id }}')">
                                 <i class="fas fa-check me-1"></i>Approve
                             </button>
-                            <button type="submit" name="action" value="more_info"
+                            <button type="button" name="action" value="more_info"
                                     class="btn btn-warning btn-sm text-dark"
-                                    onclick="return confirmAction('Request More Information', '{{ record.request_id }}')">
+                                    data-bs-toggle="modal" data-bs-target="#rfiModal">
                                 <i class="fas fa-question-circle me-1"></i>Request More Information
                             </button>
                             <button type="submit" name="action" value="reject"
@@ -694,4 +694,110 @@
     </div><!-- /col-xl-4 -->
 
 </div><!-- /row -->
+
+{% if (current_role == 'sam' and record.status == 'Pending SAM Approval') or
+      (current_role == 'controller' and record.status == 'Pending Controller Approval') or
+      (current_role == 'vp' and record.status == 'Pending VP Approval') or
+      (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
+<!-- ── Request More Information Modal ──────────────── -->
+<div class="modal fade" id="rfiModal" tabindex="-1" aria-labelledby="rfiModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="rfi-form" method="POST"
+                  action="{{ url_for('request_action', request_id=record.request_id) }}" novalidate>
+                <input type="hidden" name="action" value="more_info">
+                <div class="modal-header bg-warning">
+                    <h5 class="modal-title fw-bold text-dark" id="rfiModalLabel">
+                        <i class="fas fa-question-circle me-2"></i>Request More Information
+                    </h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3 mb-3 small">
+                        <div class="col-sm-6">
+                            <span class="section-label">Transaction</span>
+                            <div class="fw-semibold">{{ record.request_id }}</div>
+                        </div>
+                        <div class="col-sm-6">
+                            <span class="section-label">Requester</span>
+                            <div class="fw-semibold">{{ record.prepared_by or '—' }}</div>
+                        </div>
+                    </div>
+                    <label class="form-label fw-semibold" for="rfi-reason">
+                        Information or Evidence Needed <span class="text-danger">*</span>
+                    </label>
+                    <textarea class="form-control" id="rfi-reason" name="comment" rows="5"
+                              aria-describedby="rfi-reason-help rfi-reason-error" required></textarea>
+                    <div id="rfi-reason-help" class="form-text">
+                        Describe the additional information, correction, or supporting evidence the requester must provide.
+                    </div>
+                    <div id="rfi-reason-error" class="text-danger small mt-1" style="display:none;">
+                        Please describe the information or evidence needed.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal" id="rfi-cancel-btn">
+                        Cancel
+                    </button>
+                    <button type="submit" class="btn btn-warning text-dark btn-sm" id="rfi-submit-btn">
+                        <i class="fas fa-paper-plane me-1"></i>Submit Request
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+// ── Request More Information Modal ─────────────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+    const rfiModalEl = document.getElementById('rfiModal');
+    if (!rfiModalEl) return;
+
+    const rfiForm       = document.getElementById('rfi-form');
+    const rfiReason     = document.getElementById('rfi-reason');
+    const rfiError      = document.getElementById('rfi-reason-error');
+    const rfiSubmitBtn  = document.getElementById('rfi-submit-btn');
+    const rfiCancelBtn  = document.getElementById('rfi-cancel-btn');
+
+    function setRfiSubmitting(isSubmitting) {
+        rfiSubmitBtn.disabled = isSubmitting;
+        rfiCancelBtn.disabled = isSubmitting;
+        rfiSubmitBtn.innerHTML = isSubmitting
+            ? '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Submitting...'
+            : '<i class="fas fa-paper-plane me-1"></i>Submit Request';
+    }
+
+    // Move focus into the textarea whenever the modal opens
+    rfiModalEl.addEventListener('shown.bs.modal', function () {
+        rfiReason.focus();
+    });
+
+    // Cancel / Escape / backdrop click all fire this — reset so no stale state carries over
+    rfiModalEl.addEventListener('hidden.bs.modal', function () {
+        rfiForm.reset();
+        rfiReason.classList.remove('is-invalid');
+        rfiError.style.display = 'none';
+        setRfiSubmitting(false);
+    });
+
+    rfiForm.addEventListener('submit', function (e) {
+        const value = rfiReason.value.trim();
+        if (!value) {
+            e.preventDefault();
+            rfiReason.classList.add('is-invalid');
+            rfiError.style.display = 'block';
+            rfiReason.focus();
+            return;
+        }
+        rfiReason.classList.remove('is-invalid');
+        rfiError.style.display = 'none';
+        setRfiSubmitting(true);
+        // Full-page submit proceeds from here (same pattern as every other action on this page).
+    });
+});
+</script>
 {% endblock %}
