@@ -608,13 +608,25 @@ def get_bank_accounts():
     conn = get_connection()
     try:
         cur = conn.cursor()
+        # AccountNumber is Dynamic Data Masking partial() masked (e.g. "XXXX-XXXX-0123"),
+        # which intentionally preserves the real last 4 characters. Wrapping it in a T-SQL
+        # scalar function (RIGHT/SUBSTRING) breaks that partial reveal and returns a generic
+        # "xxxx" instead — so the last-4 digits are sliced here in Python from the raw
+        # (still masked-but-partially-visible) value SQL Server returns, not in the query.
         cur.execute(
-            "SELECT BankAccount_Key, BankName, AccountTitle, RIGHT(AccountNumber, 4) AS account_last4 "
+            "SELECT BankAccount_Key, BankName, AccountTitle, AccountNumber "
             "FROM [etransactions].[BankAccount] "
             "WHERE Status = 'Active' ORDER BY AccountTitle"
         )
-        return [{"bank_account_key": r[0], "bank_name": r[1], "account_title": r[2], "account_last4": r[3]}
-                for r in cur.fetchall()]
+        return [
+            {
+                "bank_account_key": r[0],
+                "bank_name": r[1],
+                "account_title": r[2],
+                "account_last4": (r[3] or "")[-4:],
+            }
+            for r in cur.fetchall()
+        ]
     finally:
         conn.close()
 
