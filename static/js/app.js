@@ -151,10 +151,7 @@ function toggleMask(fieldId) {
 
 // ── Action Button Confirmation ────────────────────────────────
 function confirmAction(label, requestId) {
-    return confirm(
-        `Confirm action: "${label}" for request ${requestId}?\n\n` +
-        'This is a development environment — workflow integration is still in progress.'
-    );
+    return confirm(`Confirm action: "${label}" for request ${requestId}?`);
 }
 
 // ── Dashboard: Clear All Filters ─────────────────────────────

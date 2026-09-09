@@ -452,14 +452,12 @@
                 <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
                     <i class="fas fa-tasks"></i>
                     <strong>Approval Actions</strong>
-                    <span class="badge bg-warning text-dark ms-auto small">Development</span>
                 </div>
                 <div class="card-body">
                     <p class="text-muted small mb-3">
-                        Actions below update the development workflow state.
-                        {# [WORKFLOW] TODO: Trigger real approval routing engine #}
-                        {# [EMAIL]    TODO: Send notification email on status change #}
-                        {# [AUDIT]    TODO: Write to immutable audit log #}
+                        Actions below are persisted to the transaction's workflow status and history.
+                        {# [EMAIL] TODO: Send notification email on status change (Power Automate) #}
+                        {# [AUDIT] TODO: Write to immutable audit log #}
                     </p>
                     <form method="POST"
                           action="{{ url_for('request_action', request_id=record.request_id) }}"
