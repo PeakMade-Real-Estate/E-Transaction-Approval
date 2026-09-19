@@ -46,6 +46,14 @@
                     </a>
                     {% endif %}
                 </li>
+                {% if can_view_bank_accounts %}
+                <li class="nav-item">
+                    <a class="nav-link px-3 {% if request.endpoint in ('bank_accounts', 'bank_account_new', 'bank_account_edit') %}active fw-semibold{% endif %}"
+                       href="{{ url_for('bank_accounts') }}">
+                        <i class="fas fa-building-columns me-1"></i> Bank Account Management
+                    </a>
+                </li>
+                {% endif %}
                 <!-- [AUTH] Identity source: Easy Auth in Azure, local dev role switcher otherwise -->
                 <li class="nav-item ms-3 pe-1">
                     <span class="nav-link py-0 d-flex align-items-center gap-2">

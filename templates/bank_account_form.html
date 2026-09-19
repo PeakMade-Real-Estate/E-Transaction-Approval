@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Add' if mode == 'new' else ('Edit' if can_edit_bank_accounts else 'View') }} Bank Account — E-Transaction Approval Dashboard{% endblock %}
+
+{% macro value(name) -%}
+{{ record.get(name, '') }}
+{%- endmacro %}
+
+{% macro checked(flag) -%}
+{% if record.get(flag) or record.get(flag|lower) %}checked{% endif %}
+{%- endmacro %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
+    <div>
+        <h2 class="mb-1 fw-bold">
+            <i class="fas fa-building-columns me-2 text-primary"></i>
+            {{ 'Add Bank Account' if mode == 'new' else ('Edit Bank Account' if can_edit_bank_accounts else 'View Bank Account') }}
+        </h2>
+        <p class="text-muted mb-0 small">Fields marked <span class="text-danger fw-bold">*</span> are required.</p>
+    </div>
+    <a href="{{ url_for('bank_accounts') }}" class="btn btn-outline-secondary btn-sm">
+        <i class="fas fa-arrow-left me-1"></i>Back to Bank Accounts
+    </a>
+</div>
+
+{% set readonly = not can_edit_bank_accounts %}
+<form method="POST" {% if mode == 'edit' %}action="{{ url_for('bank_account_edit', bank_account_key=record.bankaccount_key) }}"{% else %}action="{{ url_for('bank_account_new') }}"{% endif %}>
+    <div class="row g-4">
+        <div class="col-xl-8">
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-id-card me-2"></i>Account Identification</h6></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold" for="bank_name">Bank / Financial Institution <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="bank_name" name="bank_name" value="{{ value('bankname') or value('bank_name') }}" required {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold" for="account_title">Account Title</label>
+                            <input type="text" class="form-control" id="account_title" name="account_title" value="{{ value('accounttitle') or value('account_title') }}" {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="account_name_id">Account Name ID</label>
+                            <input type="text" class="form-control" id="account_name_id" name="account_name_id" value="{{ value('accountnameid') or value('account_name_id') }}" {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="system_account_name">System Account Name</label>
+                            <input type="text" class="form-control" id="system_account_name" name="system_account_name" value="{{ value('systemaccountname') or value('system_account_name') }}" {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-12">
+                            <label class="form-label" for="account_title_modifier">Account Title Modifier</label>
+                            <input type="text" class="form-control" id="account_title_modifier" name="account_title_modifier" value="{{ value('accounttitlemodifier') or value('account_title_modifier') }}" {% if readonly %}readonly{% endif %}>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-sitemap me-2"></i>Entity / Classification</h6></div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-7">
+                            <label class="form-label fw-semibold" for="entity_key">Associated Property or Corporate Entity <span class="text-danger">*</span></label>
+                            <select class="form-select" id="entity_key" name="entity_key" required {% if readonly %}disabled{% endif %}>
+                                <option value="">— Select Entity —</option>
+                                {% for entity in entities %}
+                                <option value="{{ entity.entity_key }}" {% if (value('entity_key') or value('entitykey'))|string == entity.entity_key|string %}selected{% endif %}>
+                                    {{ entity.classification }} — {{ entity.name }}{% if entity.entity_id %} ({{ entity.entity_id }}){% endif %}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            {% if readonly %}<input type="hidden" name="entity_key" value="{{ value('entity_key') or value('entitykey') }}">{% endif %}
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label fw-semibold" for="account_classification">Account Category <span class="text-danger">*</span></label>
+                            <input type="text" class="form-control" id="account_classification" name="account_classification" value="{{ value('accountclassification') or value('account_classification') or 'Operating' }}" required {% if readonly %}readonly{% endif %}>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-lock me-2"></i>Account & Routing Information</h6></div>
+                <div class="card-body">
+                    <div class="alert alert-secondary small py-2">
+                        Sensitive values are masked by the database and are not displayed in full. Leave sensitive fields blank when editing to preserve existing values.
+                    </div>
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label fw-semibold" for="account_number">Account Number {% if mode == 'new' %}<span class="text-danger">*</span>{% endif %}</label>
+                            <input type="text" class="form-control" id="account_number" name="account_number" autocomplete="off" {% if mode == 'new' %}required{% endif %} {% if readonly %}readonly{% endif %}>
+                            {% if mode == 'edit' and record.get('accountnumber') %}<div class="form-text">Current masked value: {{ record.accountnumber }}</div>{% endif %}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="routing_number">Routing Number</label>
+                            <input type="text" class="form-control" id="routing_number" name="routing_number" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                            {% if mode == 'edit' and record.get('routingnumber') %}<div class="form-text">Current masked value: {{ record.routingnumber }}</div>{% endif %}
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="transit_number_canada">Transit Number</label>
+                            <input type="text" class="form-control" id="transit_number_canada" name="transit_number_canada" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="institution_number_canada">Institution Number</label>
+                            <input type="text" class="form-control" id="institution_number_canada" name="institution_number_canada" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="tax_id_number">Tax ID Number</label>
+                            <input type="text" class="form-control" id="tax_id_number" name="tax_id_number" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                            {% if mode == 'edit' and record.get('taxidnumber') %}<div class="form-text">Current masked value: {{ record.taxidnumber }}</div>{% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-calculator me-2"></i>GL / Accounting Information</h6></div>
+                <div class="card-body"><div class="row g-3">
+                    <div class="col-md-6"><label class="form-label" for="gl_account_number">GL Account Number</label><input type="text" class="form-control" id="gl_account_number" name="gl_account_number" value="{{ value('glaccountnumber') or value('gl_account_number') }}" {% if readonly %}readonly{% endif %}></div>
+                    <div class="col-md-6"><label class="form-label" for="gl_account_name">GL Account Name</label><input type="text" class="form-control" id="gl_account_name" name="gl_account_name" value="{{ value('glaccountname') or value('gl_account_name') }}" {% if readonly %}readonly{% endif %}></div>
+                    <div class="col-md-6"><label class="form-label" for="account_type">Account Type</label><input type="text" class="form-control" id="account_type" name="account_type" value="{{ value('accounttype') or value('account_type') }}" {% if readonly %}readonly{% endif %}></div>
+                </div></div>
+            </div>
+
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-address-book me-2"></i>Contact Information</h6></div>
+                <div class="card-body"><div class="row g-3">
+                    <div class="col-md-6"><label class="form-label" for="bank_contact_name">Bank Contact</label><input type="text" class="form-control" id="bank_contact_name" name="bank_contact_name" value="{{ value('bankcontactname') or value('bank_contact_name') }}" {% if readonly %}readonly{% endif %}></div>
+                    <div class="col-md-6"><label class="form-label" for="phone_number">Phone Number</label><input type="text" class="form-control" id="phone_number" name="phone_number" value="{{ value('phonenumber') or value('phone_number') }}" {% if readonly %}readonly{% endif %}></div>
+                    <div class="col-12"><label class="form-label" for="address">Address</label><input type="text" class="form-control" id="address" name="address" value="{{ value('address') }}" {% if readonly %}readonly{% endif %}></div>
+                </div></div>
+            </div>
+
+            <div class="card shadow-sm mb-4">
+                <div class="detail-section-header"><h6><i class="fas fa-list-check me-2"></i>Bank Services / Capabilities</h6></div>
+                <div class="card-body">
+                    <div class="row g-2 small">
+                        {% set flags = [
+                            ('AnalysisComposite','Analysis Composite'),
+                            ('ElectronicAnalysisStatementEDI822','Electronic Analysis Statement / EDI 822'),
+                            ('GatewayPremiumReporting','Gateway Premium Reporting'),
+                            ('EnhancedImaging7YearArchive','Enhanced Imaging / 7-Year Archive'),
+                            ('ACHOnlineOriginationReporting','ACH Online Origination Reporting'),
+                            ('AccountTransferEnabled','Account Transfer'),
+                            ('StopPaymentEnabled','Stop Payment'),
+                            ('ACHModuleEnabled','ACH Module'),
+                            ('SameDayACHEnabled','Same Day ACH'),
+                            ('WireModuleEnabled','Wire Module'),
+                            ('ElectronicDataInterchangeEnabled','Electronic Data Interchange / EDI'),
+                            ('RemoteDepositCaptureEnabled','Remote Deposit Capture / RDC'),
+                            ('ACHPositivePayEnabled','ACH Positive Pay'),
+                            ('ACHDebitBlockEnabled','ACH Debit Block'),
+                            ('CheckPositivePayEnabled','Check Positive Pay'),
+                            ('PayeeVerificationEnabled','Payee Verification'),
+                            ('CheckBlockEnabled','Check Block')
+                        ] %}
+                        {% for flag, label in flags %}
+                        <div class="col-sm-6 col-md-4">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="{{ flag }}" name="{{ flag }}" {{ checked(flag) }} {% if readonly %}disabled{% endif %}>
+                                <label class="form-check-label" for="{{ flag }}">{{ label }}</label>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="col-xl-4">
+            <div class="sticky-sidebar">
+                <div class="card shadow-sm mb-4 border-primary">
+                    <div class="card-header bg-primary text-white"><strong><i class="fas fa-clipboard-check me-1"></i>Lifecycle</strong></div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold" for="status">Status <span class="text-danger">*</span></label>
+                            <select class="form-select" id="status" name="status" required {% if readonly %}disabled{% endif %}>
+                                <option value="Open" {% if (value('status') or 'Open') == 'Open' %}selected{% endif %}>Open</option>
+                                <option value="Closed" {% if value('status') == 'Closed' %}selected{% endif %}>Closed</option>
+                            </select>
+                            {% if readonly %}<input type="hidden" name="status" value="{{ value('status') }}">{% endif %}
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold" for="date_opened">Date Opened {% if mode == 'new' %}<span class="text-danger">*</span>{% endif %}</label>
+                            <input type="date" class="form-control" id="date_opened" name="date_opened" value="{{ value('dateopened') or value('date_opened') }}" {% if mode == 'new' %}required{% endif %} {% if readonly %}readonly{% endif %}>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label fw-semibold" for="date_closed">Date Closed</label>
+                            <input type="date" class="form-control" id="date_closed" name="date_closed" value="{{ value('dateclosed') or value('date_closed') }}" {% if readonly %}readonly{% endif %}>
+                            <div class="form-text">Required when Status is Closed.</div>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label" for="notes">Notes</label>
+                            <textarea class="form-control" id="notes" name="notes" rows="5" {% if readonly %}readonly{% endif %}>{{ value('notes') }}</textarea>
+                        </div>
+                        {% if can_edit_bank_accounts %}
+                        <button type="submit" class="btn btn-primary w-100 mb-2"><i class="fas fa-save me-1"></i>Save Bank Account</button>
+                        {% endif %}
+                    </div>
+                </div>
+
+                {% if mode == 'edit' and can_edit_bank_accounts and value('status') != 'Closed' %}
+                <div class="card border-danger shadow-sm">
+                    <div class="card-header bg-danger text-white"><strong><i class="fas fa-ban me-1"></i>Close Account</strong></div>
+                    <div class="card-body small">
+                        <p class="text-muted">Closing keeps the bank account record for history and reporting.</p>
+                        <form method="POST" action="{{ url_for('bank_account_close', bank_account_key=record.bankaccount_key) }}" onsubmit="return confirm('Mark this bank account as Closed?');">
+                            <label class="form-label fw-semibold" for="close_date_closed">Date Closed <span class="text-danger">*</span></label>
+                            <input type="date" class="form-control mb-2" id="close_date_closed" name="date_closed" required>
+                            <button type="submit" class="btn btn-outline-danger w-100"><i class="fas fa-ban me-1"></i>Close Bank Account</button>
+                        </form>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</form>
+{% endblock %}

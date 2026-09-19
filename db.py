@@ -9,11 +9,12 @@ nothing here runs at import time.
 
 import os
 import struct
+from datetime import datetime
 
 import pyodbc
 from azure.identity import ClientSecretCredential
 
-from workflow import STATUS_PENDING_APPROVER
+from workflow import STATUS_PENDING_APPROVER, STATUS_COMPLETED, ACTION_MORE_INFO, stage_for_status
 
 # Fixed schema — all app tables live under etransactions
 DB_SCHEMA = "etransactions"
@@ -221,7 +222,12 @@ def get_transaction_for_workflow(request_id: str):
 
 
 def get_last_rfi_origin_status(transaction_key):
-    """Return the From_Status of the most recent RequestMoreInfo WorkflowEvent, or None."""
+    """
+    Return the From_Status of the most recent Request More Information WorkflowEvent
+    for this transaction, or None. Used to route a requester_respond action back to
+    the exact stage that asked for more information, rather than restarting at
+    Pending Approver — see workflow.determine_next_step()'s ACTION_REQUESTER_RESPOND branch.
+    """
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -229,10 +235,10 @@ def get_last_rfi_origin_status(transaction_key):
             """
             SELECT TOP (1) From_Status
             FROM etransactions.WorkflowEvent
-            WHERE Transaction_Key = ? AND Event_Type = 'RequestMoreInfo'
+            WHERE Transaction_Key = ? AND Event_Type = ?
             ORDER BY Event_DateTime DESC
             """,
-            [transaction_key],
+            [transaction_key, ACTION_MORE_INFO],
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -247,9 +253,11 @@ def advance_transaction_workflow(
 ):
     """
     Atomically advance a transaction's workflow state:
-      1. Update ETransaction.Current_Status/CurrentOwner_User_Key, conditioned on
-         the expected from_status (optimistic concurrency — guards against
-         double-click/retry/duplicate processing).
+      1. Update ETransaction.Current_Status/Current_Workflow_Stage/CurrentOwner_User_Key,
+         conditioned on the expected from_status (optimistic concurrency — guards
+         against double-click/retry/duplicate processing). Current_Workflow_Stage
+         is derived from new_status via workflow.stage_for_status() in this SAME
+         statement, so Status/Stage/Owner can never go out of sync with each other.
       2. Insert a WorkflowEvent row (permanent audit history).
       3. Close out the prior current WorkflowAssignment and insert a new one for
          the new owner, preserving assignment history.
@@ -264,8 +272,11 @@ def advance_transaction_workflow(
     try:
         cur = conn.cursor()
 
-        set_clauses = ["Current_Status = ?", "CurrentOwner_User_Key = ?", "Modified_DateTime = ?"]
-        params = [new_status, new_owner_user_key, now]
+        set_clauses = [
+            "Current_Status = ?", "Current_Workflow_Stage = ?",
+            "CurrentOwner_User_Key = ?", "Modified_DateTime = ?",
+        ]
+        params = [new_status, stage_for_status(new_status), new_owner_user_key, now]
         if bank_releaser_user_key is not None:
             set_clauses.append("BankReleaser_User_Key = ?")
             params.append(bank_releaser_user_key)
@@ -309,6 +320,145 @@ def advance_transaction_workflow(
                 [transaction_key, workflow_role, new_owner_user_key,
                  actor_user_key, "Workflow", now],
             )
+
+        conn.commit()
+    except WorkflowConflictError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def add_transaction_comment(transaction_key, *, author_user_key, comment_type, comment_text):
+    """
+    Insert a TransactionComment row. Author_User_Key is NOT NULL in the schema —
+    callers must have a resolved AppUser identity (not available in the local dev
+    role-switcher bypass without Easy Auth); comment_text must be non-empty.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO etransactions.TransactionComment ("
+            "  Transaction_Key, Author_User_Key, Comment_Type,"
+            "  Comment_Text, Created_DateTime"
+            ") OUTPUT INSERTED.Comment_Key VALUES (?,?,?,?,?)",
+            [transaction_key, author_user_key, comment_type, comment_text, datetime.now()],
+        )
+        comment_key = cur.fetchone()[0]
+        conn.commit()
+        return comment_key
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_reassignment_candidates(role_code: str):
+    """
+    Return active AppUsers holding `role_code` in AppUserRole, for the
+    reassignment replacement dropdown (e.g. role_code='sam' for Approver,
+    'controller' for Controller — see workflow.REASSIGNMENT_STAGE_MAP).
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT u.User_Key, u.Display_Name "
+            "FROM [etransactions].[AppUserRole] r "
+            "JOIN [etransactions].[AppUser] u ON u.User_Key = r.User_Key "
+            "WHERE r.Role_Code = ? AND r.Is_Active = 1 AND u.Active_Status = 1 "
+            "ORDER BY u.Display_Name",
+            [role_code],
+        )
+        return [{"user_key": r[0], "display_name": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def reassign_transaction_participant(
+    transaction_key, *, expected_status, stage_field, workflow_role,
+    prior_user_key, new_user_key, actor_user_key, actor_role,
+    event_type, decision, reason,
+):
+    """
+    Reassign the active Approver or Controller on a transaction — status and
+    all prior approval history are preserved; this never advances the workflow.
+
+    Conditioned on the expected current status AND current assignee (optimistic
+    concurrency, same double-click/retry guard as advance_transaction_workflow).
+    Closes out the prior current WorkflowAssignment and opens a new one
+    (Assignment_Source='Reassignment', Reassignment_Reason=reason), then logs a
+    WorkflowEvent linked to that new assignment via Related_Assignment_Key.
+
+    Raises WorkflowConflictError if the transaction's status or the stage's
+    assignee no longer match what the caller last read — no rows are written.
+    """
+    fk_column = {
+        "selected_approver_user_key":   "SelectedApprover_User_Key",
+        "selected_controller_user_key": "SelectedController_User_Key",
+    }[stage_field]
+
+    now = datetime.now()
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            f"UPDATE etransactions.ETransaction "
+            f"SET {fk_column} = ?, CurrentOwner_User_Key = ?, Modified_DateTime = ? "
+            f"WHERE Transaction_Key = ? AND Current_Status = ? AND {fk_column} = ?",
+            [new_user_key, new_user_key, now, transaction_key, expected_status, prior_user_key],
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            raise WorkflowConflictError(
+                "This transaction's stage or assignee has already changed; reassignment not applied."
+            )
+
+        cur.execute(
+            "UPDATE etransactions.WorkflowAssignment SET Is_Current = 0, End_DateTime = ? "
+            "WHERE Transaction_Key = ? AND Is_Current = 1",
+            [now, transaction_key],
+        )
+        cur.execute(
+            "INSERT INTO etransactions.WorkflowAssignment ("
+            "  Transaction_Key, Workflow_Role, Assigned_User_Key,"
+            "  Assigned_By_User_Key, Assignment_Source,"
+            "  Assigned_DateTime, Is_Current, Reassignment_Reason"
+            ") OUTPUT INSERTED.Assignment_Key VALUES (?,?,?,?,?,?,1,?)",
+            [transaction_key, workflow_role, new_user_key,
+             actor_user_key, "Reassignment", now, reason],
+        )
+        assignment_key = cur.fetchone()[0]
+
+        def _display_name(user_key):
+            cur.execute(
+                "SELECT Display_Name FROM etransactions.AppUser WHERE User_Key = ?",
+                [user_key],
+            )
+            row = cur.fetchone()
+            return row[0] if row else "Unknown"
+
+        comment = (
+            f"{workflow_role} reassigned from {_display_name(prior_user_key)} "
+            f"to {_display_name(new_user_key)}: {reason}"
+        )
+
+        cur.execute(
+            "INSERT INTO etransactions.WorkflowEvent ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [transaction_key, actor_user_key, actor_role,
+             event_type, decision, expected_status, expected_status,
+             now, comment, assignment_key],
+        )
 
         conn.commit()
     except WorkflowConflictError:
@@ -505,6 +655,7 @@ _EVENT_TYPE_MAP = {
     "treasuryreviewed": "treasury_reviewed",
     "released":         "mark_released",
     "completed":        "mark_completed",
+    "reassign":         "reassign",
 }
 
 
@@ -603,6 +754,82 @@ def get_user_list():
         conn.close()
 
 
+def get_bank_account_status(bank_account_key: int):
+    """
+    Return the raw Status ('Open'/'Active'/'Closed') of a BankAccount, or None
+    if the key doesn't exist. Used to authoritatively re-validate the
+    originating-account selection server-side at intake — the client only
+    supplies a hidden bank_account_key that must never be trusted as-is.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Status FROM [etransactions].[BankAccount] WHERE BankAccount_Key = ?",
+            [bank_account_key],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def find_prior_completed_beneficiary_match(*, payee_name, receiving_bank_name,
+                                            receiving_account_number, receiving_routing_number):
+    """
+    Return {"transaction_key", "request_id", "last_used_date"} for the most
+    recent COMPLETED transaction whose beneficiary identity (payee + receiving
+    bank name) and banking identity (account + routing number) exactly match
+    the given values, or None if no such transaction exists.
+
+    Receiving_Account_Number/Receiving_Routing_Number are Dynamic Data Masking
+    columns and this app's principal has no UNMASK grant — but the equality
+    comparison below runs entirely inside SQL Server's WHERE clause against the
+    real underlying values (DDM only masks values RETURNED to the client, not
+    internal predicate evaluation — verified empirically against seed data
+    before relying on this). Only a non-sensitive Transaction_Key/Request_ID/
+    date are ever returned; the real account/routing numbers are never read
+    back into the application.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT TOP (1) t.Transaction_Key, t.Request_ID, t.Submitted_Date
+            FROM [etransactions].[ETransaction] t
+            JOIN [etransactions].[BeneficiaryBankInstruction] bi
+                ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
+            JOIN [etransactions].[Beneficiary] b
+                ON b.Beneficiary_Key = t.Beneficiary_Key
+            WHERE t.Current_Status = ?
+              AND bi.Receiving_Account_Number = ?
+              AND bi.Receiving_Routing_Number = ?
+              AND UPPER(bi.Receiving_Bank_Name) = UPPER(?)
+              AND UPPER(b.Payee_Name) = UPPER(?)
+            ORDER BY t.Submitted_Date DESC
+            """,
+            [
+                STATUS_COMPLETED,
+                (receiving_account_number or "").strip(),
+                (receiving_routing_number or "").strip(),
+                (receiving_bank_name or "").strip(),
+                (payee_name or "").strip(),
+            ],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        txn_key, request_id, submitted_date = row
+        return {
+            "transaction_key": txn_key,
+            "request_id": request_id,
+            "last_used_date": submitted_date.strftime("%Y-%m-%d") if hasattr(submitted_date, "strftime") else str(submitted_date or ""),
+        }
+    finally:
+        conn.close()
+
+
 def get_bank_accounts():
     """Return all active company bank accounts for the originating-account dropdown."""
     conn = get_connection()
@@ -616,7 +843,7 @@ def get_bank_accounts():
         cur.execute(
             "SELECT BankAccount_Key, BankName, AccountTitle, AccountNumber "
             "FROM [etransactions].[BankAccount] "
-            "WHERE Status = 'Active' ORDER BY AccountTitle"
+            "WHERE Status = 'Open' ORDER BY AccountTitle"
         )
         return [
             {
@@ -631,19 +858,464 @@ def get_bank_accounts():
         conn.close()
 
 
+BANK_ACCOUNT_SERVICE_FLAGS = (
+    "AnalysisComposite",
+    "ElectronicAnalysisStatementEDI822",
+    "GatewayPremiumReporting",
+    "EnhancedImaging7YearArchive",
+    "ACHOnlineOriginationReporting",
+    "AccountTransferEnabled",
+    "StopPaymentEnabled",
+    "ACHModuleEnabled",
+    "SameDayACHEnabled",
+    "WireModuleEnabled",
+    "ElectronicDataInterchangeEnabled",
+    "RemoteDepositCaptureEnabled",
+    "ACHPositivePayEnabled",
+    "ACHDebitBlockEnabled",
+    "CheckPositivePayEnabled",
+    "PayeeVerificationEnabled",
+    "CheckBlockEnabled",
+)
+
+
+# ─────────────────────────────────────────────────────────────
+#  Bank Account lifecycle audit (BankAccountEvent) — NOT YET LIVE
+#
+#  etransactions.BankAccountEvent does not exist in the database yet. This
+#  section implements the full, ready-to-activate audit/event layer (types,
+#  change-diffing, the atomic insert helper) so it can be wired into
+#  create_bank_account()/update_bank_account()/the close route with a small,
+#  low-risk follow-up change once the table has been created. It is
+#  deliberately NOT called from any live code path yet — doing so today would
+#  break Bank Account create/edit/close with "Invalid object name" errors.
+#
+#  Proposed DDL (run this before wiring the calls below into live CRUD):
+#
+#    CREATE TABLE etransactions.BankAccountEvent (
+#        BankAccountEvent_Key INT IDENTITY PRIMARY KEY,
+#        BankAccount_Key INT NOT NULL REFERENCES etransactions.BankAccount(BankAccount_Key),
+#        Event_Type VARCHAR(50) NOT NULL,
+#        PerformedBy_User_Key INT NOT NULL REFERENCES etransactions.AppUser(User_Key),
+#        Event_DateTime DATETIME2 NOT NULL,
+#        Reason NVARCHAR(500) NULL,
+#        Previous_Status VARCHAR(20) NULL,
+#        New_Status VARCHAR(20) NULL,
+#        Change_Detail NVARCHAR(MAX) NULL
+#    );
+# ─────────────────────────────────────────────────────────────
+
+BANK_ACCOUNT_EVENT_CREATED  = "BANK_ACCOUNT_CREATED"
+BANK_ACCOUNT_EVENT_UPDATED  = "BANK_ACCOUNT_UPDATED"
+BANK_ACCOUNT_EVENT_CLOSED   = "BANK_ACCOUNT_CLOSED"
+BANK_ACCOUNT_EVENT_REOPENED = "BANK_ACCOUNT_REOPENED"
+
+# Sensitive BankAccount fields — never written to Change_Detail with their real
+# values, only whether they changed (e.g. "AccountNumber changed: Yes").
+_BANK_ACCOUNT_SENSITIVE_FIELDS = {
+    "account_number", "routing_number", "transit_number_canada",
+    "institution_number_canada", "tax_id_number",
+}
+
+# (form-data key, get_bank_account_record() key, display label)
+_BANK_ACCOUNT_DIFF_FIELDS = [
+    ("bank_name", "bankname", "BankName"),
+    ("account_name_id", "accountnameid", "AccountNameID"),
+    ("account_title", "accounttitle", "AccountTitle"),
+    ("account_title_modifier", "accounttitlemodifier", "AccountTitleModifier"),
+    ("system_account_name", "systemaccountname", "SystemAccountName"),
+    ("account_number", "accountnumber", "AccountNumber"),
+    ("routing_number", "routingnumber", "RoutingNumber"),
+    ("transit_number_canada", "transitnumbercanada", "TransitNumberCanada"),
+    ("institution_number_canada", "institutionnumbercanada", "InstitutionNumberCanada"),
+    ("gl_account_number", "glaccountnumber", "GLAccountNumber"),
+    ("gl_account_name", "glaccountname", "GLAccountName"),
+    ("tax_id_number", "taxidnumber", "TaxIDNumber"),
+    ("address", "address", "Address"),
+    ("phone_number", "phonenumber", "PhoneNumber"),
+    ("account_type", "accounttype", "AccountType"),
+    ("account_classification", "accountclassification", "AccountClassification (Account Category)"),
+    ("bank_contact_name", "bankcontactname", "BankContactName"),
+    ("notes", "notes", "Notes"),
+] + [(flag, flag.lower(), flag) for flag in BANK_ACCOUNT_SERVICE_FLAGS]
+
+
+def summarize_bank_account_changes(previous: dict, new_data: dict) -> str | None:
+    """
+    Compare a previous BankAccount record (as returned by get_bank_account_record(),
+    lower-cased keys) against a new submission's form data (as built by
+    app._bank_account_form_data()) and return a human-readable Change_Detail
+    string, or None if nothing actually changed (no audit row for a no-op save).
+
+    Sensitive fields (account/routing/transit/institution/tax ID numbers) are
+    handled specially: update_bank_account() only ever overwrites them when the
+    submitted value is non-blank (blank = "keep existing masked value"), so a
+    non-blank submission IS the change signal — we never compare against the
+    masked previous value, and never record real values, only "changed: Yes".
+    """
+    changes = []
+    for form_key, record_key, label in _BANK_ACCOUNT_DIFF_FIELDS:
+        new_val = new_data.get(form_key)
+
+        if form_key in _BANK_ACCOUNT_SENSITIVE_FIELDS:
+            if isinstance(new_val, str) and new_val.strip():
+                changes.append(f"{label} changed: Yes")
+            continue
+
+        old_val = previous.get(record_key)
+        if isinstance(new_val, bool):
+            if bool(old_val) != new_val:
+                changes.append(f"{label}: {bool(old_val)} \u2192 {new_val}")
+            continue
+
+        old_norm = (old_val or "").strip() if isinstance(old_val, str) else (old_val or "")
+        new_norm = (new_val or "").strip() if isinstance(new_val, str) else (new_val or "")
+        if str(old_norm) != str(new_norm):
+            changes.append(f"{label}: '{old_norm}' \u2192 '{new_norm}'")
+
+    return "; ".join(changes) if changes else None
+
+
+def bank_account_lifecycle_event_for_status_change(previous_status: str, new_status: str):
+    """
+    Return the BANK_ACCOUNT_* event type for a Status transition, or None if
+    this transition doesn't warrant a distinct lifecycle event on its own
+    (covered by BANK_ACCOUNT_EVENT_UPDATED instead) — e.g. Closed->Closed must
+    never produce a second/duplicate close event.
+    """
+    prev = (previous_status or "").strip().lower()
+    new = (new_status or "").strip().lower()
+    if prev == new:
+        return None
+    if new == "closed":
+        return BANK_ACCOUNT_EVENT_CLOSED
+    if prev == "closed":
+        return BANK_ACCOUNT_EVENT_REOPENED
+    return None
+
+
+def record_bank_account_event(cur, bank_account_key, *, event_type, performed_by_user_key,
+                               reason=None, previous_status=None, new_status=None, change_detail=None):
+    """
+    Insert a BankAccountEvent row using the CALLER's own cursor (not a new
+    connection), so it commits atomically as part of whatever BankAccount
+    INSERT/UPDATE the caller is already performing. NOT YET CALLED from live
+    code — see the module-level note above this section.
+    """
+    cur.execute(
+        "INSERT INTO etransactions.BankAccountEvent ("
+        "  BankAccount_Key, Event_Type, PerformedBy_User_Key, Event_DateTime,"
+        "  Reason, Previous_Status, New_Status, Change_Detail"
+        ") VALUES (?,?,?,?,?,?,?,?)",
+        [bank_account_key, event_type, performed_by_user_key, datetime.now(),
+         reason, previous_status, new_status, change_detail],
+    )
+
+
+def _status_for_display(status: str) -> str:
+    # Defensive display-only fallback: canonical values are now strictly 'Open'/'Closed'
+    # (legacy 'Active' rows were migrated 2026-09-18 — see /memories/repo/schema-facts.md).
+    # New writes never produce 'Active'; this only guards against stray historical data.
+    return "Open" if status == "Active" else (status or "")
+
+
+def get_business_entities(active_only=True):
+    """Return BusinessEntity rows for Bank Account Management dropdowns/filters."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        sql = (
+            "SELECT Entity_Key, Entity_ID, Property_Department_Name, Classification "
+            "FROM etransactions.BusinessEntity"
+        )
+        params = []
+        if active_only:
+            sql += " WHERE Active_Status = ?"
+            params.append(1)
+        sql += " ORDER BY Classification, Property_Department_Name"
+        cur.execute(sql, params)
+        return [
+            {
+                "entity_key": r[0],
+                "entity_id": r[1] or "",
+                "name": r[2] or "",
+                "classification": r[3] or "",
+            }
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
+def search_bank_account_records(filters=None):
+    """
+    Search the consolidated BankAccount master using safe, non-sensitive result fields.
+
+    Returns both `classification` (BusinessEntity.Classification — Property/Corporate,
+    the account's true ownership classification) and `account_type` (BankAccount.AccountType
+    — the banking product type, e.g. Checking/Savings) as SEPARATE fields. Do not conflate
+    them — see app.py's _bank_account_form_data() docstring for the full field-naming note.
+    """
+    filters = filters or {}
+    where = []
+    params = []
+
+    if filters.get("bank_name"):
+        where.append("ba.BankName LIKE ?")
+        params.append(f"%{filters['bank_name']}%")
+    if filters.get("classification"):
+        where.append("be.Classification = ?")
+        params.append(filters["classification"])
+    if filters.get("entity_key"):
+        where.append("ba.Entity_Key = ?")
+        params.append(int(filters["entity_key"]))
+    if filters.get("status"):
+        where.append("ba.Status = ?")
+        params.append(filters["status"])
+    if filters.get("opened_from"):
+        where.append("ba.DateOpened >= ?")
+        params.append(filters["opened_from"])
+    if filters.get("opened_to"):
+        where.append("ba.DateOpened <= ?")
+        params.append(filters["opened_to"])
+    if filters.get("closed_from"):
+        where.append("ba.DateClosed >= ?")
+        params.append(filters["closed_from"])
+    if filters.get("closed_to"):
+        where.append("ba.DateClosed <= ?")
+        params.append(filters["closed_to"])
+
+    sql = """
+        SELECT
+            ba.BankAccount_Key,
+            ba.BankName,
+            ba.AccountTitle,
+            ba.AccountNameID,
+            ba.AccountNumber,
+            ba.AccountType,
+            ba.AccountClassification,
+            ba.Status,
+            ba.DateOpened,
+            ba.DateClosed,
+            ba.Entity_Key,
+            ISNULL(be.Property_Department_Name, '') AS EntityName,
+            ISNULL(be.Entity_ID, '') AS EntityID,
+            ISNULL(be.Classification, '') AS EntityClassification
+        FROM etransactions.BankAccount ba
+        INNER JOIN etransactions.BusinessEntity be ON be.Entity_Key = ba.Entity_Key
+    """
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ba.BankName, ba.AccountTitle"
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        records = []
+        for r in cur.fetchall():
+            last4 = (r[4] or "")[-4:]
+            if filters.get("last4") and last4 != filters["last4"]:
+                continue
+            records.append({
+                "bank_account_key": r[0],
+                "bank_name": r[1] or "",
+                "account_title": r[2] or "",
+                "account_name_id": r[3] or "",
+                "account_last4": last4,
+                "account_type": r[5] or "",
+                "account_category": r[6] or "",
+                "status": _status_for_display(r[7]),
+                "date_opened": r[8].strftime("%Y-%m-%d") if hasattr(r[8], "strftime") else (r[8] or ""),
+                "date_closed": r[9].strftime("%Y-%m-%d") if hasattr(r[9], "strftime") else (r[9] or ""),
+                "entity_key": r[10],
+                "entity_name": r[11] or "",
+                "entity_id": r[12] or "",
+                "classification": r[13] or "",
+            })
+        return records
+    finally:
+        conn.close()
+
+
+def get_bank_account_record(bank_account_key: int):
+    """Return a full BankAccount row for the add/edit form, or None if not found."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        columns = [
+            "BankAccount_Key", "Entity_Key", "AccountClassification", "BankName",
+            "AccountNameID", "AccountTitle", "AccountTitleModifier", "SystemAccountName",
+            "AccountNumber", "RoutingNumber", "TransitNumberCanada", "InstitutionNumberCanada",
+            "GLAccountNumber", "GLAccountName", "TaxIDNumber", "Address", "PhoneNumber",
+            "AccountType", "Status", "DateOpened", "DateClosed", "BankContactName", "Notes",
+            *BANK_ACCOUNT_SERVICE_FLAGS,
+        ]
+        cur.execute(
+            f"SELECT {', '.join(columns)} FROM etransactions.BankAccount WHERE BankAccount_Key = ?",
+            [bank_account_key],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        record = dict(zip([c.lower() for c in columns], row))
+        for key in ("dateopened", "dateclosed"):
+            val = record.get(key)
+            record[key] = val.strftime("%Y-%m-%d") if hasattr(val, "strftime") else (val or "")
+        record["status"] = _status_for_display(record.get("status"))
+        return record
+    finally:
+        conn.close()
+
+
+def create_bank_account(data: dict, actor_user_key: int) -> int:
+    """Insert a BankAccount row. Caller validates permissions and required fields."""
+    now = datetime.now()
+    service_values = [1 if data.get(flag) else 0 for flag in BANK_ACCOUNT_SERVICE_FLAGS]
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO etransactions.BankAccount (
+                Entity_Key, AccountClassification, BankName, AccountNameID, AccountTitle,
+                AccountTitleModifier, SystemAccountName, AccountNumber, RoutingNumber,
+                TransitNumberCanada, InstitutionNumberCanada, GLAccountNumber, GLAccountName,
+                TaxIDNumber, Address, PhoneNumber, AccountType, Status, DateOpened,
+                DateClosed, BankContactName, Notes,
+                AnalysisComposite, ElectronicAnalysisStatementEDI822, GatewayPremiumReporting,
+                EnhancedImaging7YearArchive, ACHOnlineOriginationReporting,
+                AccountTransferEnabled, StopPaymentEnabled, ACHModuleEnabled, SameDayACHEnabled,
+                WireModuleEnabled, ElectronicDataInterchangeEnabled, RemoteDepositCaptureEnabled,
+                ACHPositivePayEnabled, ACHDebitBlockEnabled, CheckPositivePayEnabled,
+                PayeeVerificationEnabled, CheckBlockEnabled,
+                CreatedDate, CreatedBy_User_Key, ModifiedDate, ModifiedBy_User_Key
+            ) OUTPUT INSERTED.BankAccount_Key
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            [
+                int(data["entity_key"]), data.get("account_classification") or "Operating",
+                data["bank_name"], data.get("account_name_id", ""), data.get("account_title", ""),
+                data.get("account_title_modifier", ""), data.get("system_account_name", ""),
+                data["account_number"], data.get("routing_number", ""), data.get("transit_number_canada", ""),
+                data.get("institution_number_canada", ""), data.get("gl_account_number", ""),
+                data.get("gl_account_name", ""), data.get("tax_id_number", ""), data.get("address", ""),
+                data.get("phone_number", ""), data.get("account_type", ""), data["status"],
+                data.get("date_opened") or None, data.get("date_closed") or None,
+                data.get("bank_contact_name", ""), data.get("notes", ""),
+                *service_values, now, actor_user_key, now, actor_user_key,
+            ],
+        )
+        key = cur.fetchone()[0]
+        conn.commit()
+        return key
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def update_bank_account(bank_account_key: int, data: dict, actor_user_key: int) -> None:
+    """Update a BankAccount row; blank sensitive inputs preserve existing values."""
+    now = datetime.now()
+    assignments = [
+        "Entity_Key = ?", "AccountClassification = ?", "BankName = ?", "AccountNameID = ?",
+        "AccountTitle = ?", "AccountTitleModifier = ?", "SystemAccountName = ?",
+        "GLAccountNumber = ?", "GLAccountName = ?", "Address = ?", "PhoneNumber = ?",
+        "AccountType = ?", "Status = ?", "DateOpened = ?", "DateClosed = ?",
+        "BankContactName = ?", "Notes = ?",
+    ]
+    params = [
+        int(data["entity_key"]), data.get("account_classification") or "Operating",
+        data["bank_name"], data.get("account_name_id", ""), data.get("account_title", ""),
+        data.get("account_title_modifier", ""), data.get("system_account_name", ""),
+        data.get("gl_account_number", ""), data.get("gl_account_name", ""), data.get("address", ""),
+        data.get("phone_number", ""), data.get("account_type", ""), data["status"],
+        data.get("date_opened") or None, data.get("date_closed") or None,
+        data.get("bank_contact_name", ""), data.get("notes", ""),
+    ]
+    for field, column in (
+        ("account_number", "AccountNumber"),
+        ("routing_number", "RoutingNumber"),
+        ("transit_number_canada", "TransitNumberCanada"),
+        ("institution_number_canada", "InstitutionNumberCanada"),
+        ("tax_id_number", "TaxIDNumber"),
+    ):
+        if data.get(field):
+            assignments.append(f"{column} = ?")
+            params.append(data[field])
+    for flag in BANK_ACCOUNT_SERVICE_FLAGS:
+        assignments.append(f"{flag} = ?")
+        params.append(1 if data.get(flag) else 0)
+    assignments.extend(["ModifiedDate = ?", "ModifiedBy_User_Key = ?"])
+    params.extend([now, actor_user_key, bank_account_key])
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"UPDATE etransactions.BankAccount SET {', '.join(assignments)} WHERE BankAccount_Key = ?",
+            params,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # ─────────────────────────────────────────────────────────────
 #  Write path — new transaction submission
 # ─────────────────────────────────────────────────────────────
+
+def _generate_unique_request_id(cur) -> str:
+    from datetime import datetime as _dt
+    import random as _random
+
+    for _ in range(10):
+        candidate = f"TXN-{_dt.now().year}-{_random.randint(1000, 9999)}"
+        cur.execute(
+            "SELECT 1 FROM [etransactions].[ETransaction] WHERE Request_ID = ?",
+            [candidate],
+        )
+        if not cur.fetchone():
+            return candidate
+    raise RuntimeError("Unable to generate a unique Request_ID.")
+
+
+def reserve_request_id() -> str:
+    """
+    Return a not-yet-used Request_ID without creating any ETransaction row.
+
+    Lets the intake flow upload required SharePoint attachments under the final
+    Request_ID BEFORE the SQL transaction is inserted, so a failed required
+    upload never leaves an orphaned/incomplete transaction behind in SQL.
+
+    Small inherent race window (the ID isn't actually reserved anywhere until
+    insert_transaction() inserts it) — no worse than the pre-existing generate-
+    then-insert loop this was extracted from.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        return _generate_unique_request_id(cur)
+    finally:
+        conn.close()
+
 
 def insert_transaction(data: dict) -> str:
     """
     Insert all rows for a new transaction in a single transaction.
     Inserts: Beneficiary, BeneficiaryBankInstruction, ETransaction,
              TransactionVerification, WorkflowEvent (Submitted).
-    Returns the generated Request_ID.
+
+    If data['request_id'] is set (e.g. via reserve_request_id(), called earlier
+    so required attachments could be uploaded first), that exact ID is used;
+    otherwise one is generated here. Returns the Request_ID actually used.
     """
     from datetime import datetime as _dt
-    import random as _random
 
     now   = _dt.now()
     today = now.date()
@@ -690,19 +1362,8 @@ def insert_transaction(data: dict) -> str:
         )
         bi_key = cur.fetchone()[0]
 
-        # Generate a unique Request_ID
-        request_id = None
-        for _ in range(10):
-            candidate = f"TXN-{now.year}-{_random.randint(1000, 9999)}"
-            cur.execute(
-                "SELECT 1 FROM [etransactions].[ETransaction] WHERE Request_ID = ?",
-                [candidate],
-            )
-            if not cur.fetchone():
-                request_id = candidate
-                break
-        if not request_id:
-            raise RuntimeError("Unable to generate a unique Request_ID.")
+        # Use the caller's pre-reserved Request_ID if provided, else generate one now.
+        request_id = data.get("request_id") or _generate_unique_request_id(cur)
 
         tier           = data["approval_tier"]
         # Every transaction starts at Pending Approver regardless of tier — the
@@ -755,7 +1416,7 @@ def insert_transaction(data: dict) -> str:
                 1 if data.get("urgent") else 0,
                 data.get("urgency_reason", ""),
                 initial_status,
-                "Approver",
+                stage_for_status(initial_status),
                 tier,
                 1 if requires_vp  else 0,
                 1 if requires_cfo else 0,
@@ -769,17 +1430,18 @@ def insert_transaction(data: dict) -> str:
         cur.execute(
             "INSERT INTO [etransactions].[TransactionVerification] ("
             "  Transaction_Key,"
-            "  Instructions_Previously_Used, Last_Used_Date,"
+            "  Instructions_Previously_Used, Last_Used_Date, Prior_Transaction_Key,"
             "  Verbal_Confirmed,"
             "  Confirmed_With_KnownContact_Flag, Confirmed_With_Requester_Flag,"
             "  Verbal_Contact_Name, Verbal_Confirm_DateTime,"
             "  AVS_Score, External_Source_Flag, Internal_Doc_Not_Used_Flag,"
             "  Verified_By_User_Key, Created_DateTime"
-            ") OUTPUT INSERTED.Verification_Key VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ") OUTPUT INSERTED.Verification_Key VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 txn_key,
                 1 if data.get("instructions_previously_used") else 0,
                 data.get("last_used_date") or None,
+                data.get("prior_transaction_key") or None,
                 1 if data.get("verbal_confirmed") else 0,
                 1 if data.get("verbal_known_contact") else 0,
                 1 if data.get("verbal_requester") else 0,

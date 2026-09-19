@@ -23,3 +23,6 @@ Thumbs.db
 # Environment / secrets — never commit
 .env
 .env.*
+
+# Ad-hoc debug/schema-check scripts (never meant to be committed)
+_tmp_*.py

@@ -18,7 +18,7 @@ TODO (Future Integration Points):
 
 from flask import (
     Flask, render_template, request,
-    redirect, url_for, session, flash, jsonify,
+    redirect, url_for, session, flash, jsonify, abort,
 )
 from datetime import datetime
 import copy
@@ -101,6 +101,31 @@ def _upload_intake_attachments(request_id):
         except Exception:
             app.logger.exception("SharePoint upload failed for %s on %s", field_name, request_id)
 
+
+def _upload_required_intake_attachments(request_id):
+    """
+    Upload the required intake attachments to SharePoint under the given
+    (pre-reserved, not-yet-committed-to-SQL) request_id, raising on the first
+    failure — unlike _upload_intake_attachments(), which logs and continues.
+
+    Called BEFORE db.insert_transaction() for SQL-backed submissions so a
+    required-document upload failure never leaves a "successfully submitted"
+    transaction behind with missing evidence. No-op when SharePoint is
+    disabled (matches existing dev-mode graceful degradation elsewhere).
+    """
+    if not sharepoint_enabled():
+        return
+    role = ROLE_DISPLAY.get(session.get("role"), "Submitter")
+    for field_name, section, doc_type, is_required in _INTAKE_ATTACHMENT_FIELDS.values():
+        file_storage = request.files.get(field_name)
+        if not file_storage or not file_storage.filename:
+            continue
+        sharepoint.upload_attachment(
+            request_id, file_storage,
+            section=section, doc_type=doc_type,
+            uploaded_by_role=role, is_required=is_required,
+        )
+
 # Display names used in timeline / comment author fields
 ROLE_DISPLAY = {
     "submitter":           "Submitter",
@@ -113,6 +138,177 @@ ROLE_DISPLAY = {
     "it_admin":            "IT Administrator",
     "treasury_bank_admin": "Treasury Backup (Bank Maintenance)",
 }
+
+BANK_ACCOUNT_VIEW_ROLES = {"treasury", "treasury_bank_admin", "vp", "cfo"}
+BANK_ACCOUNT_EDIT_ROLES = {"treasury", "treasury_bank_admin"}
+
+
+def can_view_bank_accounts():
+    return session.get("role") in BANK_ACCOUNT_VIEW_ROLES
+
+
+def can_edit_bank_accounts():
+    return session.get("role") in BANK_ACCOUNT_EDIT_ROLES
+
+
+def require_bank_account_view():
+    if not can_view_bank_accounts():
+        abort(403)
+
+
+def _bank_account_form_data():
+    # Terminology note (do not confuse these three distinct concepts):
+    #   BusinessEntity.Classification   -> Property / Corporate (which entity owns this account)
+    #   BankAccount.AccountType         -> banking product type, e.g. Checking / Savings
+    #   BankAccount.AccountClassification -> accounting/business category, e.g. Operating,
+    #                                        Security Deposit, Payroll — labeled "Account
+    #                                        Category" in the UI. Physical column name is
+    #                                        kept as AccountClassification to avoid an
+    #                                        unnecessary/risky column rename.
+    data = {
+        "entity_key": request.form.get("entity_key", "").strip(),
+        "bank_name": request.form.get("bank_name", "").strip(),
+        "account_name_id": request.form.get("account_name_id", "").strip(),
+        "account_title": request.form.get("account_title", "").strip(),
+        "account_title_modifier": request.form.get("account_title_modifier", "").strip(),
+        "system_account_name": request.form.get("system_account_name", "").strip(),
+        "account_number": request.form.get("account_number", "").strip(),
+        "routing_number": request.form.get("routing_number", "").strip(),
+        "transit_number_canada": request.form.get("transit_number_canada", "").strip(),
+        "institution_number_canada": request.form.get("institution_number_canada", "").strip(),
+        "gl_account_number": request.form.get("gl_account_number", "").strip(),
+        "gl_account_name": request.form.get("gl_account_name", "").strip(),
+        "tax_id_number": request.form.get("tax_id_number", "").strip(),
+        "address": request.form.get("address", "").strip(),
+        "phone_number": request.form.get("phone_number", "").strip(),
+        "account_type": request.form.get("account_type", "").strip(),
+        "account_classification": request.form.get("account_classification", "").strip(),
+        "status": request.form.get("status", "").strip(),
+        "date_opened": request.form.get("date_opened", "").strip(),
+        "date_closed": request.form.get("date_closed", "").strip(),
+        "bank_contact_name": request.form.get("bank_contact_name", "").strip(),
+        "notes": request.form.get("notes", "").strip(),
+    }
+    for flag in db.BANK_ACCOUNT_SERVICE_FLAGS:
+        data[flag] = request.form.get(flag) == "on"
+    return data
+
+
+def _validate_bank_account_form(data, *, is_new):
+    errors = []
+    if not data.get("entity_key"):
+        errors.append("Associated Property or Corporate Entity is required.")
+    if not data.get("bank_name"):
+        errors.append("Bank / Financial Institution is required.")
+    if is_new and not data.get("account_number"):
+        errors.append("Account Number is required for new bank accounts.")
+    if data.get("status") not in ("Open", "Closed"):
+        errors.append("Status must be Open or Closed.")
+    if is_new and not data.get("date_opened"):
+        errors.append("Date Opened is required for new bank accounts.")
+    if data.get("status") == "Closed" and not data.get("date_closed"):
+        errors.append("Date Closed is required when closing a bank account.")
+    return errors
+
+
+def _validate_intake_submission(frm, *, files_present: dict, bank_account_status):
+    """
+    Authoritative SERVER-SIDE validation for /intake/submit — mirrors the
+    client-side checks already in intake.html so a direct POST (bypassing
+    JavaScript) cannot skip required fields, required attachments, the AVS/
+    verification policy, or an invalid/closed originating bank account.
+
+    Pure function — no DB/network calls. `bank_account_status` is the raw
+    BankAccount.Status value already looked up by the caller (None if the
+    supplied key doesn't exist), and `files_present` is a dict of the three
+    named required attachment fields to booleans (was a real file selected).
+
+    Returns a list of user-facing error strings; empty means the submission
+    may proceed.
+    """
+    errors = []
+
+    def require(field, label):
+        if not (frm.get(field) or "").strip():
+            errors.append(f"{label} is required.")
+
+    # A. Basic required fields
+    require("request_type", "Request Type")
+    require("treasury_service_date", "Requested Treasury Service Date")
+    require("prepared_by_key", "Prepared By")
+    require("prepared_date", "Prepared Date")
+    require("property_dept", "Property / Department")
+    require("approver_key", "Approver")
+    require("controller_key", "Controller")
+    require("payment_purpose", "Payment Purpose / Description")
+    require("currency", "Currency")
+
+    amount_raw = (frm.get("amount") or "").replace(",", "").strip()
+    try:
+        if not amount_raw or float(amount_raw) <= 0:
+            errors.append("Amount is required and must be greater than zero.")
+    except ValueError:
+        errors.append("Amount must be a valid number.")
+
+    # B. Urgent
+    if frm.get("urgent") == "yes" and not (frm.get("urgency_reason") or "").strip():
+        errors.append("Urgency Reason is required when the request is marked urgent.")
+
+    # C. Originating bank account — never trust the hidden client field alone
+    bank_account_key = (frm.get("bank_account_key") or "").strip()
+    if not bank_account_key:
+        errors.append("Originating Bank Account is required — search by last 4 digits and select an account.")
+    elif bank_account_status is None:
+        errors.append("The selected Originating Bank Account could not be found.")
+    elif bank_account_status != "Open":
+        errors.append("The selected Originating Bank Account is closed and cannot be used.")
+
+    # D. Receiving / beneficiary bank information
+    require("recv_payee_name", "Recipient / Payee Name")
+    require("recv_bank_name", "Receiving Bank Name")
+    require("recv_account_name", "Receiving Account Name")
+    require("recv_account_number", "Receiving Account Number")
+    require("recv_routing_number", "Receiving Routing Number")
+    if frm.get("request_type") == "Wire" and not (frm.get("recv_bank_address") or "").strip():
+        errors.append("Receiving Bank / Beneficiary Address is required for Wire transactions.")
+
+    # E/F. Required attachments (mirrors intake.html validateAttachments())
+    if not files_present.get("validation_evidence"):
+        errors.append("Validation Evidence attachment is required.")
+    if not files_present.get("wire_ach_instructions"):
+        errors.append("External ACH/Wire Instructions attachment is required.")
+    if not files_present.get("payment_support"):
+        errors.append("Payment Support attachment is required.")
+
+    # G. AVS score range. Note: the UI has a single "Validation Evidence" file
+    # that serves as both the AVS screenshot AND the alternative-verification
+    # document — there is no separate alternative-verification field to check,
+    # so the AVS>=90/below-90/unavailable branches all reduce to the same E/F
+    # attachment-presence check above; only the numeric range is AVS-specific.
+    avs_raw = (frm.get("avs_score") or "").strip()
+    if avs_raw:
+        try:
+            avs_score = int(avs_raw)
+        except ValueError:
+            errors.append("AVS Score must be a whole number between 0 and 100.")
+        else:
+            if avs_score < 0 or avs_score > 100:
+                errors.append("AVS Score must be between 0 and 100.")
+
+    # H. New / unverified instructions — verbal confirmation with a KNOWN
+    # CONTACT specifically (not "confirmed with the requester") is required.
+    if frm.get("instructions_previously_used") != "yes":
+        if frm.get("verbal_confirmed_with_known") != "on":
+            errors.append("Verbal confirmation with a known contact is required for new/unverified banking instructions.")
+        if not (frm.get("verbal_contact_name") or "").strip():
+            errors.append("Verbal Confirmation Contact Name is required for new/unverified banking instructions.")
+        if not (frm.get("verbal_confirm_datetime") or "").strip():
+            errors.append("Verbal Confirmation Date/Time is required for new/unverified banking instructions.")
+    else:
+        if not (frm.get("last_used_date") or "").strip():
+            errors.append("Last Date Used is required when banking instructions were previously used.")
+
+    return errors
 
 # ─────────────────────────────────────────────────────────────
 #  Jinja2 Filters & Context Processors
@@ -193,6 +389,8 @@ def inject_globals():
         "current_role": session.get("role"),
         "auth_source":  identity["source"],
         "can_switch_role": identity["source"] == "dev" or len(identity["roles"]) > 1,
+        "can_view_bank_accounts": can_view_bank_accounts(),
+        "can_edit_bank_accounts": can_edit_bank_accounts(),
     }
 
 
@@ -406,10 +604,75 @@ def intake_submit():
 
     _db_on = database_enabled()
     if _db_on:
+        files_present = {
+            "validation_evidence":   bool(request.files.get("file_validation_evidence") and request.files["file_validation_evidence"].filename),
+            "wire_ach_instructions": bool(request.files.get("file_wire_ach_instructions") and request.files["file_wire_ach_instructions"].filename),
+            "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
+        }
+        bank_account_key_raw = frm.get("bank_account_key", "").strip()
+        bank_account_status = None
+        if bank_account_key_raw:
+            try:
+                bank_account_status = db.get_bank_account_status(int(bank_account_key_raw))
+            except Exception:
+                bank_account_status = None
+
+        errors = _validate_intake_submission(frm, files_present=files_present, bank_account_status=bank_account_status)
+
+        # Part 2 — validate the "Previously Used" claim against completed history.
+        # Only meaningful once the basic receiving-bank fields themselves are valid.
+        prior_transaction_key = None
+        previously_used_claimed = frm.get("instructions_previously_used") == "yes"
+        if not errors:
+            try:
+                prior_match = db.find_prior_completed_beneficiary_match(
+                    payee_name=frm.get("recv_payee_name", ""),
+                    receiving_bank_name=frm.get("recv_bank_name", ""),
+                    receiving_account_number=frm.get("recv_account_number", ""),
+                    receiving_routing_number=frm.get("recv_routing_number", ""),
+                )
+            except Exception:
+                app.logger.exception("Unable to check prior beneficiary instruction history")
+                prior_match = None
+
+            if previously_used_claimed and prior_match is None:
+                errors.append(
+                    "These receiving banking instructions could not be verified as previously used and "
+                    "completed. Please follow the new/unverified instructions process (verbal confirmation "
+                    "with a known contact) instead of marking them as previously used."
+                )
+            elif not previously_used_claimed and prior_match is not None:
+                errors.append(
+                    f"These exact receiving banking instructions were already used on a completed transaction "
+                    f"({prior_match['request_id']}, {prior_match['last_used_date']}). Please review and check "
+                    f"\u201cBanking Instructions Previously Used?\u201d if this is correct, or correct the "
+                    f"receiving bank details if this is actually a new payee/account."
+                )
+            elif previously_used_claimed and prior_match is not None:
+                prior_transaction_key = prior_match["transaction_key"]
+
+        if errors:
+            for err in errors:
+                flash(err, "warning")
+            users, bank_accounts = [], []
+            try:
+                users         = db.get_user_list()
+                bank_accounts = db.get_bank_accounts()
+            except Exception:
+                pass
+            return render_template("intake.html", users=users, bank_accounts=bank_accounts, errors=errors)
+
         try:
+            request_id = db.reserve_request_id()
+            # Required attachments are uploaded to SharePoint BEFORE the SQL
+            # transaction exists — if a required upload fails, no ETransaction
+            # row is ever created (see _upload_required_intake_attachments()).
+            _upload_required_intake_attachments(request_id)
+
             _vdt_raw = frm.get("verbal_confirm_datetime", "")
             _vdt = (_vdt_raw.replace("T", " ") + ":00") if _vdt_raw else ""
             db_data = {
+                "request_id":       request_id,
                 "prepared_by_key":  int(frm.get("prepared_by_key", 0)),
                 "approver_key":     int(frm.get("approver_key", 0)),
                 "controller_key":   int(frm.get("controller_key", 0)),
@@ -428,6 +691,7 @@ def intake_submit():
                 "urgency_reason":        frm.get("urgency_reason", ""),
                 "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
                 "last_used_date":        frm.get("last_used_date", ""),
+                "prior_transaction_key": prior_transaction_key,
                 "verbal_confirmed":      frm.get("verbal_confirmed") == "on",
                 "verbal_known_contact":  frm.get("verbal_confirmed_with_known") == "on",
                 "verbal_requester":      frm.get("verbal_confirmed_with_requester") == "on",
@@ -447,10 +711,17 @@ def intake_submit():
                 "recv_contact_phone":    frm.get("recv_contact_phone", ""),
             }
             request_id = db.insert_transaction(db_data)
-            _upload_intake_attachments(request_id)
             return redirect(url_for("confirmation", request_id=request_id))
         except Exception as e:
-            flash(f"Database error — submission saved locally only. ({e})", "danger")
+            app.logger.exception("Intake submission failed")
+            flash(f"Unable to submit this request. Please try again. ({e})", "danger")
+            users, bank_accounts = [], []
+            try:
+                users         = db.get_user_list()
+                bank_accounts = db.get_bank_accounts()
+            except Exception:
+                pass
+            return render_template("intake.html", users=users, bank_accounts=bank_accounts, errors=[])
 
     submitted = session.get("submitted_requests", [])
     submitted.append(record)
@@ -588,6 +859,147 @@ def dashboard():
     )
 
 
+@app.route("/bank-accounts")
+def bank_accounts():
+    """Bank Account Management dashboard."""
+    require_bank_account_view()
+    filters = {
+        "bank_name": request.args.get("bank_name", "").strip(),
+        "classification": request.args.get("classification", "").strip(),
+        "entity_key": request.args.get("entity_key", "").strip(),
+        "status": request.args.get("status", "").strip(),
+        "opened_from": request.args.get("opened_from", "").strip(),
+        "opened_to": request.args.get("opened_to", "").strip(),
+        "closed_from": request.args.get("closed_from", "").strip(),
+        "closed_to": request.args.get("closed_to", "").strip(),
+        "last4": request.args.get("last4", "").strip(),
+    }
+    try:
+        records = db.search_bank_account_records(filters)
+        entities = db.get_business_entities(active_only=False)
+    except Exception:
+        app.logger.exception("Unable to load Bank Account Management dashboard")
+        records = []
+        entities = []
+        flash("Unable to load bank accounts right now.", "danger")
+
+    stats = {
+        "open": sum(1 for r in records if r["status"] == "Open"),
+        "closed": sum(1 for r in records if r["status"] == "Closed"),
+        "corporate": sum(1 for r in records if r["classification"].lower() == "corporate"),
+        "property": sum(1 for r in records if r["classification"].lower() == "property"),
+    }
+    return render_template(
+        "bank_accounts.html",
+        records=records,
+        entities=entities,
+        filters=filters,
+        stats=stats,
+    )
+
+
+@app.route("/bank-accounts/new", methods=["GET", "POST"])
+def bank_account_new():
+    if not can_edit_bank_accounts():
+        abort(403)
+    entities = db.get_business_entities(active_only=True)
+    if request.method == "POST":
+        data = _bank_account_form_data()
+        errors = _validate_bank_account_form(data, is_new=True)
+        actor_key = current_app_user_key()
+        if actor_key is None:
+            errors.append("Your signed-in user could not be matched to an active AppUser record.")
+        if not errors:
+            try:
+                bank_account_key = db.create_bank_account(data, actor_key)
+                flash("Bank account created successfully.", "success")
+                return redirect(url_for("bank_account_edit", bank_account_key=bank_account_key))
+            except Exception:
+                app.logger.exception("Unable to create bank account")
+                errors.append("Unable to save the bank account. Please try again.")
+        for error in errors:
+            flash(error, "warning")
+        return render_template("bank_account_form.html", mode="new", record=data, entities=entities)
+    return render_template("bank_account_form.html", mode="new", record={}, entities=entities)
+
+
+@app.route("/bank-accounts/<int:bank_account_key>/edit", methods=["GET", "POST"])
+def bank_account_edit(bank_account_key):
+    require_bank_account_view()
+    record = db.get_bank_account_record(bank_account_key)
+    if record is None:
+        flash("Bank account not found.", "warning")
+        return redirect(url_for("bank_accounts"))
+    entities = db.get_business_entities(active_only=False)
+    if request.method == "POST":
+        if not can_edit_bank_accounts():
+            abort(403)
+        data = _bank_account_form_data()
+        errors = _validate_bank_account_form(data, is_new=False)
+        actor_key = current_app_user_key()
+        if actor_key is None:
+            errors.append("Your signed-in user could not be matched to an active AppUser record.")
+        if not errors:
+            try:
+                db.update_bank_account(bank_account_key, data, actor_key)
+                flash("Bank account updated successfully.", "success")
+                return redirect(url_for("bank_account_edit", bank_account_key=bank_account_key))
+            except Exception:
+                app.logger.exception("Unable to update bank account %s", bank_account_key)
+                errors.append("Unable to save the bank account. Please try again.")
+        for error in errors:
+            flash(error, "warning")
+        data["bankaccount_key"] = bank_account_key
+        return render_template("bank_account_form.html", mode="edit", record=data, entities=entities)
+    return render_template("bank_account_form.html", mode="edit", record=record, entities=entities)
+
+
+@app.route("/bank-accounts/<int:bank_account_key>/close", methods=["POST"])
+def bank_account_close(bank_account_key):
+    if not can_edit_bank_accounts():
+        abort(403)
+    record = db.get_bank_account_record(bank_account_key)
+    if record is None:
+        flash("Bank account not found.", "warning")
+        return redirect(url_for("bank_accounts"))
+    data = dict(record)
+    data.update({
+        "entity_key": str(record.get("entity_key") or ""),
+        "bank_name": record.get("bankname", ""),
+        "account_name_id": record.get("accountnameid", ""),
+        "account_title": record.get("accounttitle", ""),
+        "account_title_modifier": record.get("accounttitlemodifier", ""),
+        "system_account_name": record.get("systemaccountname", ""),
+        "account_number": "",
+        "routing_number": "",
+        "transit_number_canada": "",
+        "institution_number_canada": "",
+        "gl_account_number": record.get("glaccountnumber", ""),
+        "gl_account_name": record.get("glaccountname", ""),
+        "tax_id_number": "",
+        "address": record.get("address", ""),
+        "phone_number": record.get("phonenumber", ""),
+        "account_type": record.get("accounttype", ""),
+        "account_classification": record.get("accountclassification", ""),
+        "status": "Closed",
+        "date_opened": record.get("dateopened", ""),
+        "date_closed": request.form.get("date_closed", "").strip(),
+        "bank_contact_name": record.get("bankcontactname", ""),
+        "notes": record.get("notes", ""),
+    })
+    errors = _validate_bank_account_form(data, is_new=False)
+    actor_key = current_app_user_key()
+    if actor_key is None:
+        errors.append("Your signed-in user could not be matched to an active AppUser record.")
+    if errors:
+        for error in errors:
+            flash(error, "warning")
+        return redirect(url_for("bank_account_edit", bank_account_key=bank_account_key))
+    db.update_bank_account(bank_account_key, data, actor_key)
+    flash("Bank account closed successfully.", "success")
+    return redirect(url_for("bank_accounts"))
+
+
 @app.route("/dashboard/request/<request_id>")
 def request_detail(request_id):
     """
@@ -605,6 +1017,8 @@ def request_detail(request_id):
         except Exception:
             pass
 
+    from_sql = record is not None
+
     if record is None:
         submitted = session.get("submitted_requests", [])
         all_requests = MOCK_REQUESTS + submitted
@@ -620,6 +1034,20 @@ def request_detail(request_id):
     display["orig_routing_number_masked"]  = mask_routing(record.get("orig_routing_number", ""))
     display["recv_account_number_masked"]  = mask_account(record.get("recv_account_number", ""))
     display["recv_routing_number_masked"]  = mask_routing(record.get("recv_routing_number", ""))
+
+    display["can_add_comment"] = from_sql
+
+    display["can_reassign"] = False
+    display["reassignment_candidates"] = []
+    stage = workflow.REASSIGNMENT_STAGE_MAP.get(record.get("status"))
+    if from_sql and stage and session.get("role") in workflow.REASSIGNMENT_ROLES:
+        _stage_field, workflow_role, role_code = stage
+        display["can_reassign"] = True
+        display["reassignment_workflow_role"] = workflow_role
+        try:
+            display["reassignment_candidates"] = db.get_reassignment_candidates(role_code)
+        except Exception:
+            app.logger.exception("Unable to load reassignment candidates for %s", request_id)
 
     if sharepoint_enabled():
         try:
@@ -730,6 +1158,19 @@ def _handle_sql_workflow_action(request_id, txn):
         )
         flash(f"Action recorded: <strong>{label}</strong> for {request_id}.", cat)
 
+        if comment and user_key is not None:
+            comment_type = workflow.ACTION_COMMENT_TYPE_MAP.get(action)
+            if comment_type:
+                try:
+                    db.add_transaction_comment(
+                        txn["transaction_key"],
+                        author_user_key=user_key,
+                        comment_type=comment_type,
+                        comment_text=comment,
+                    )
+                except Exception:
+                    app.logger.exception("Unable to record comment for %s", request_id)
+
     except workflow.UnauthorizedActionError as exc:
         flash(str(exc), "warning")
     except workflow.WorkflowConfigurationError as exc:
@@ -740,6 +1181,110 @@ def _handle_sql_workflow_action(request_id, txn):
     except Exception:
         app.logger.exception("Workflow action failed for %s", request_id)
         flash("Unable to process this action. Please try again.", "danger")
+
+    return redirect(url_for("request_detail", request_id=request_id))
+
+
+@app.route("/dashboard/request/<request_id>/reassign", methods=["POST"])
+def request_reassign(request_id):
+    """
+    Reassign the active Approver or Controller on a SQL-backed transaction.
+    Does not change Current_Status and never requires resubmission — see
+    workflow.authorize_reassignment() / db.reassign_transaction_participant().
+    """
+    if not database_enabled():
+        flash("Reassignment requires the SQL data source and is not available for mock/session records.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    role           = session.get("role")
+    actor_user_key = current_app_user_key()
+    reason         = request.form.get("reason", "").strip()
+    new_user_key_raw = request.form.get("new_user_key", "").strip()
+
+    if not reason:
+        flash("A reassignment reason is required.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    try:
+        new_user_key = int(new_user_key_raw)
+    except (TypeError, ValueError):
+        flash("Please select a replacement.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    try:
+        txn = db.get_transaction_for_workflow(request_id)
+        if txn is None:
+            flash("Request not found.", "warning")
+            return redirect(url_for("dashboard"))
+
+        workflow.authorize_reassignment(role=role, txn=txn)
+
+        stage_field, workflow_role, _role_code = workflow.REASSIGNMENT_STAGE_MAP[txn["status"]]
+        prior_user_key = txn[stage_field]
+
+        if new_user_key == prior_user_key:
+            flash("Please select a different replacement.", "warning")
+            return redirect(url_for("request_detail", request_id=request_id))
+
+        db.reassign_transaction_participant(
+            txn["transaction_key"],
+            expected_status=txn["status"],
+            stage_field=stage_field,
+            workflow_role=workflow_role,
+            prior_user_key=prior_user_key,
+            new_user_key=new_user_key,
+            actor_user_key=actor_user_key,
+            actor_role=ROLE_DISPLAY.get(role, role or "Unknown"),
+            event_type=workflow.ACTION_REASSIGN,
+            decision="Reassigned",
+            reason=reason,
+        )
+        flash(f"{workflow_role} reassigned for {request_id}.", "success")
+
+    except workflow.UnauthorizedActionError as exc:
+        flash(str(exc), "warning")
+    except db.WorkflowConflictError:
+        flash("This transaction's assignment already changed; please refresh and try again.", "info")
+    except Exception:
+        app.logger.exception("Reassignment failed for %s", request_id)
+        flash("Unable to complete reassignment. Please try again.", "danger")
+
+    return redirect(url_for("request_detail", request_id=request_id))
+
+
+@app.route("/dashboard/request/<request_id>/comment", methods=["POST"])
+def request_comment(request_id):
+    """Add a standalone General note to a SQL-backed transaction's comment history."""
+    if not database_enabled():
+        flash("Comments require the SQL data source and are not available for mock/session records.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    comment_text = request.form.get("comment_text", "").strip()
+    if not comment_text:
+        flash("Please enter a comment before submitting.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    user_key = current_app_user_key()
+    if user_key is None:
+        flash("Adding a comment requires a signed-in identity and is not available in the local dev role switcher.", "warning")
+        return redirect(url_for("request_detail", request_id=request_id))
+
+    try:
+        txn = db.get_transaction_for_workflow(request_id)
+        if txn is None:
+            flash("Request not found.", "warning")
+            return redirect(url_for("dashboard"))
+
+        db.add_transaction_comment(
+            txn["transaction_key"],
+            author_user_key=user_key,
+            comment_type=workflow.COMMENT_TYPE_GENERAL,
+            comment_text=comment_text,
+        )
+        flash("Comment added.", "success")
+    except Exception:
+        app.logger.exception("Unable to add comment for %s", request_id)
+        flash("Unable to add comment. Please try again.", "danger")
 
     return redirect(url_for("request_detail", request_id=request_id))
 

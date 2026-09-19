@@ -642,6 +642,53 @@
                 </div>
             </div>
 
+            {% if record.can_reassign %}
+            <!-- ── Reassign Approver / Controller ────────────── -->
+            <div class="card shadow-sm mb-4 border-secondary">
+                <div class="card-header bg-secondary text-white d-flex align-items-center gap-2">
+                    <i class="fas fa-user-edit"></i>
+                    <strong>Reassign {{ record.reassignment_workflow_role }}</strong>
+                </div>
+                <div class="card-body">
+                    <p class="text-muted small mb-3">
+                        Reassigns the active {{ record.reassignment_workflow_role }} without changing this
+                        transaction's status or requiring resubmission. All prior approval history is preserved.
+                    </p>
+                    <form method="POST"
+                          action="{{ url_for('request_reassign', request_id=record.request_id) }}"
+                          id="reassign-form">
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold">Current {{ record.reassignment_workflow_role }}</label>
+                            <input type="text" class="form-control form-control-sm" disabled
+                                   value="{{ record.approver if record.reassignment_workflow_role == 'Approver' else record.controller }}">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold" for="new_user_key">
+                                New {{ record.reassignment_workflow_role }} <span class="text-danger">*</span>
+                            </label>
+                            <select class="form-select form-select-sm" id="new_user_key" name="new_user_key" required>
+                                <option value="">Select a replacement…</option>
+                                {% for candidate in record.reassignment_candidates %}
+                                <option value="{{ candidate.user_key }}">{{ candidate.display_name }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label small fw-semibold" for="reassign-reason">
+                                Reassignment Reason <span class="text-danger">*</span>
+                            </label>
+                            <textarea class="form-control form-control-sm" id="reassign-reason" name="reason"
+                                      rows="2" required></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-secondary btn-sm w-100"
+                                onclick="return confirm('Reassign the {{ record.reassignment_workflow_role }} for {{ record.request_id }}?');">
+                            <i class="fas fa-user-edit me-1"></i>Reassign
+                        </button>
+                    </form>
+                </div>
+            </div>
+            {% endif %}
+
             <!-- ── Approval Timeline ─────────────────────────── -->
             <div class="card shadow-sm mb-4">
                 <div class="card-header bg-light d-flex align-items-center gap-2">
@@ -698,6 +745,19 @@
                     <div class="text-muted small text-center py-3">No comments yet.</div>
                     {% endif %}
                 </div>
+                {% if record.can_add_comment %}
+                <div class="card-footer bg-white">
+                    <form method="POST" action="{{ url_for('request_comment', request_id=record.request_id) }}">
+                        <div class="mb-2">
+                            <textarea class="form-control form-control-sm" name="comment_text" rows="2"
+                                      placeholder="Add a comment..." required></textarea>
+                        </div>
+                        <button type="submit" class="btn btn-outline-secondary btn-sm">
+                            <i class="fas fa-comment-dots me-1"></i>Add Comment
+                        </button>
+                    </form>
+                </div>
+                {% endif %}
             </div>
 
             <!-- ── Additional Attachments ─────────────────────── -->

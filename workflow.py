@@ -35,6 +35,34 @@ CANCEL_ELIGIBLE_STATUSES = {
     STATUS_PENDING_VP, STATUS_PENDING_CFO, STATUS_MORE_INFO,
 }
 
+# ── Current_Workflow_Stage — kept in sync with Current_Status on every write ──
+# A transaction's Current_Workflow_Stage must never go stale relative to its
+# Current_Status (previously only set once at intake to "Approver" and never
+# updated again). This map is the single source of truth for the correct stage
+# label for a given status; db.advance_transaction_workflow() and
+# db.insert_transaction() both derive Current_Workflow_Stage from this map in
+# the SAME statement that writes Current_Status, so they can never diverge.
+# STATUS_TREASURY_INITIATED is included defensively even though no code path
+# currently writes that status value (see COPILOT_CONTEXT.md / prior audit).
+STAGE_BY_STATUS = {
+    STATUS_PENDING_APPROVER:   "Approver",
+    STATUS_PENDING_CONTROLLER: "Controller",
+    STATUS_PENDING_VP:         "VP",
+    STATUS_PENDING_CFO:        "CFO",
+    STATUS_MORE_INFO:          "Requester",
+    STATUS_READY_FOR_TREASURY: "Treasury",
+    STATUS_TREASURY_INITIATED: "Bank Release",
+    STATUS_AWAITING_RELEASE:   "Bank Release",
+    STATUS_TREASURY_RELEASED:  "Treasury",
+    STATUS_COMPLETED:          "Completed",
+    STATUS_CANCELLED:          "Cancelled",
+}
+
+
+def stage_for_status(status: str) -> str:
+    """Return the Current_Workflow_Stage label that must accompany a given Current_Status."""
+    return STAGE_BY_STATUS.get(status, status or "")
+
 # ── Actions a route may report to the workflow service ───────
 ACTION_APPROVE            = "approve"
 ACTION_MORE_INFO          = "more_info"
@@ -44,8 +72,45 @@ ACTION_TREASURY_INITIATED = "treasury_initiated"   # Property: Treasury hands of
 ACTION_TREASURY_RELEASED  = "treasury_released"    # Corporate: Treasury performs final release
 ACTION_BANK_RELEASE       = "bank_release"          # Property: Controller/VP completes release
 ACTION_MARK_COMPLETED     = "mark_completed"        # Corporate: Treasury confirms completion
+ACTION_REASSIGN           = "reassign"               # Admin/Treasury/Controller reassigns Approver or Controller
 
 PROPERTY_CLASSIFICATION = "property"
+
+# ── TransactionComment.Comment_Type vocabulary ────────────────
+# Controlled values — classify the human-entered note itself, not the workflow
+# action that produced it (that's WorkflowEvent.Event_Type's job).
+COMMENT_TYPE_GENERAL  = "GENERAL"   # Standalone note, not tied to a specific workflow function
+COMMENT_TYPE_RFI      = "RFI"       # Request More Information reason, or the requester's response to it
+COMMENT_TYPE_APPROVAL = "APPROVAL"  # Approver/Controller/VP/CFO review note
+COMMENT_TYPE_TREASURY = "TREASURY"  # Treasury processing note (initiation, release, completion)
+
+# Maps a reported action to the Comment_Type its optional comment should be
+# stored under when mirrored into TransactionComment. cancel has no dedicated
+# category in the current spec, so it falls back to GENERAL. reassign is
+# intentionally absent — its reason already lives in
+# WorkflowAssignment.Reassignment_Reason and is not mirrored here.
+ACTION_COMMENT_TYPE_MAP = {
+    ACTION_APPROVE:            COMMENT_TYPE_APPROVAL,
+    ACTION_MORE_INFO:          COMMENT_TYPE_RFI,
+    ACTION_REQUESTER_RESPOND:  COMMENT_TYPE_RFI,
+    ACTION_CANCEL:             COMMENT_TYPE_GENERAL,
+    ACTION_TREASURY_INITIATED: COMMENT_TYPE_TREASURY,
+    ACTION_TREASURY_RELEASED:  COMMENT_TYPE_TREASURY,
+    ACTION_BANK_RELEASE:       COMMENT_TYPE_TREASURY,
+    ACTION_MARK_COMPLETED:     COMMENT_TYPE_TREASURY,
+}
+
+# Roles permitted to reassign the active Approver or Controller on a transaction.
+REASSIGNMENT_ROLES = ("business_admin", "treasury", "controller")
+
+# Stages that currently support reassignment, mapped to:
+#   (txn dict key holding the assignee, WorkflowAssignment.Workflow_Role label,
+#    AppUserRole.Role_Code to look up eligible replacements)
+# VP, CFO, and Bank Releaser reassignment are not yet an approved requirement.
+REASSIGNMENT_STAGE_MAP = {
+    STATUS_PENDING_APPROVER:   ("selected_approver_user_key",   "Approver",   "sam"),
+    STATUS_PENDING_CONTROLLER: ("selected_controller_user_key", "Controller", "controller"),
+}
 
 
 class WorkflowError(Exception):
@@ -150,6 +215,29 @@ def authorize_action(*, role: str, user_key, txn: dict, action: str) -> None:
         return
 
     raise UnauthorizedActionError("Unknown action.")
+
+
+def authorize_reassignment(*, role: str, txn: dict) -> None:
+    """
+    Raise UnauthorizedActionError unless `role` may reassign the transaction's
+    currently active Approver/Controller stage.
+
+    Enforced server-side regardless of what the UI shows/hides. Only Business
+    Administrator, Treasury, and Controller may reassign, and only while the
+    transaction is at a stage in REASSIGNMENT_STAGE_MAP (Pending Approver or
+    Pending Controller) — reassignment never requires resubmission and does not
+    change Current_Status.
+    """
+    status = txn.get("status")
+
+    if status in TERMINAL_STATUSES:
+        raise UnauthorizedActionError(f"This transaction is {status.lower()} and no longer accepts actions.")
+
+    if role not in REASSIGNMENT_ROLES:
+        raise UnauthorizedActionError("Your role cannot reassign this transaction.")
+
+    if status not in REASSIGNMENT_STAGE_MAP:
+        raise UnauthorizedActionError("This transaction is not at a stage that supports reassignment.")
 
 
 def determine_next_step(txn: dict, action: str):
