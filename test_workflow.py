@@ -289,12 +289,14 @@ class StageSynchronizationTests(unittest.TestCase):
         self.assertEqual(wf.REASSIGNMENT_STAGE_MAP[wf.STATUS_PENDING_CONTROLLER][1], "Controller")
         self.assertEqual(wf.stage_for_status(wf.STATUS_PENDING_CONTROLLER), "Controller")
 
-    def test_28_corporate_treasury_released_stage(self):
+    def test_28_corporate_treasury_released_completes_directly(self):
+        # Batch 5: Corporate treasury_released now completes directly — no
+        # subsequent Bank Release or manual Mark Completed step.
         txn = make_txn(status=wf.STATUS_READY_FOR_TREASURY, entity_classification="Corporate")
         new_status, owner, role, satisfied = wf.determine_next_step(txn, wf.ACTION_TREASURY_RELEASED)
-        self.assertEqual(new_status, wf.STATUS_TREASURY_RELEASED)
+        self.assertEqual(new_status, wf.STATUS_COMPLETED)
         self.assertIsNone(owner)
-        self.assertEqual(wf.stage_for_status(new_status), "Treasury")
+        self.assertEqual(wf.stage_for_status(new_status), "Completed")
 
     def test_29_property_treasury_initiated_stage_is_bank_release(self):
         txn = make_txn(status=wf.STATUS_READY_FOR_TREASURY, entity_classification="Property",

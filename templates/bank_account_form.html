@@ -9,6 +9,20 @@
 {% if record.get(flag) or record.get(flag|lower) %}checked{% endif %}
 {%- endmacro %}
 
+{% macro reveal_row(field_key, record_key) -%}
+{% if mode == 'edit' and record.get(record_key) %}
+<div class="form-text d-flex align-items-center gap-2">
+    <span>Current masked value:</span>
+    <span id="ba-{{ field_key }}-masked" class="masked-value">{{ record.get(record_key) }}</span>
+    <span id="ba-{{ field_key }}-result" class="unmasked-value" style="display:none;"></span>
+    <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1" id="ba-{{ field_key }}-toggle"
+            onclick="revealBankingField('ba-{{ field_key }}', '{{ url_for('bank_account_reveal', bank_account_key=record.bankaccount_key) }}', '{{ field_key }}')">
+        <i class="fas fa-eye me-1"></i>Reveal
+    </button>
+</div>
+{% endif %}
+{%- endmacro %}
+
 {% block content %}
 <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div>
@@ -25,6 +39,7 @@
 
 {% set readonly = not can_edit_bank_accounts %}
 <form method="POST" {% if mode == 'edit' %}action="{{ url_for('bank_account_edit', bank_account_key=record.bankaccount_key) }}"{% else %}action="{{ url_for('bank_account_new') }}"{% endif %}>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <div class="row g-4">
         <div class="col-xl-8">
             <div class="card shadow-sm mb-4">
@@ -83,31 +98,33 @@
                 <div class="detail-section-header"><h6><i class="fas fa-lock me-2"></i>Account & Routing Information</h6></div>
                 <div class="card-body">
                     <div class="alert alert-secondary small py-2">
-                        Sensitive values are masked by the database and are not displayed in full. Leave sensitive fields blank when editing to preserve existing values.
+                        Sensitive values are masked by default and are never sent to the browser in full. Leave sensitive fields blank when editing to preserve existing values — entering a masked placeholder (e.g. "XXXX-XXXX-1234") instead of a real value will be rejected.
                     </div>
                     <div class="row g-3">
                         <div class="col-md-6">
                             <label class="form-label fw-semibold" for="account_number">Account Number {% if mode == 'new' %}<span class="text-danger">*</span>{% endif %}</label>
                             <input type="text" class="form-control" id="account_number" name="account_number" autocomplete="off" {% if mode == 'new' %}required{% endif %} {% if readonly %}readonly{% endif %}>
-                            {% if mode == 'edit' and record.get('accountnumber') %}<div class="form-text">Current masked value: {{ record.accountnumber }}</div>{% endif %}
+                            {{ reveal_row('account_number', 'accountnumber') }}
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="routing_number">Routing Number</label>
                             <input type="text" class="form-control" id="routing_number" name="routing_number" autocomplete="off" {% if readonly %}readonly{% endif %}>
-                            {% if mode == 'edit' and record.get('routingnumber') %}<div class="form-text">Current masked value: {{ record.routingnumber }}</div>{% endif %}
+                            {{ reveal_row('routing_number', 'routingnumber') }}
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="transit_number_canada">Transit Number</label>
                             <input type="text" class="form-control" id="transit_number_canada" name="transit_number_canada" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                            {{ reveal_row('transit_number', 'transitnumbercanada') }}
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="institution_number_canada">Institution Number</label>
                             <input type="text" class="form-control" id="institution_number_canada" name="institution_number_canada" autocomplete="off" {% if readonly %}readonly{% endif %}>
+                            {{ reveal_row('institution_number', 'institutionnumbercanada') }}
                         </div>
                         <div class="col-md-6">
                             <label class="form-label" for="tax_id_number">Tax ID Number</label>
                             <input type="text" class="form-control" id="tax_id_number" name="tax_id_number" autocomplete="off" {% if readonly %}readonly{% endif %}>
-                            {% if mode == 'edit' and record.get('taxidnumber') %}<div class="form-text">Current masked value: {{ record.taxidnumber }}</div>{% endif %}
+                            {{ reveal_row('tax_id', 'taxidnumber') }}
                         </div>
                     </div>
                 </div>
@@ -205,6 +222,7 @@
                     <div class="card-body small">
                         <p class="text-muted">Closing keeps the bank account record for history and reporting.</p>
                         <form method="POST" action="{{ url_for('bank_account_close', bank_account_key=record.bankaccount_key) }}" onsubmit="return confirm('Mark this bank account as Closed?');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                             <label class="form-label fw-semibold" for="close_date_closed">Date Closed <span class="text-danger">*</span></label>
                             <input type="date" class="form-control mb-2" id="close_date_closed" name="date_closed" required>
                             <button type="submit" class="btn btn-outline-danger w-100"><i class="fas fa-ban me-1"></i>Close Bank Account</button>

@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="csrf-token" content="{{ csrf_token() }}">
     <title>{% block title %}E-Transaction Approval Dashboard{% endblock %}</title>
     <!-- Bootstrap 5.3 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
@@ -38,7 +39,7 @@
                     </a>
                 </li>
                 <li class="nav-item ms-1">
-                    {% if current_role != 'treasury' %}
+                    {% if 'submitter' in current_roles %}
                     <a class="nav-link btn btn-sm btn-outline-light px-3 py-1
                               {% if request.endpoint == 'intake' %}active{% endif %}"
                        href="{{ url_for('intake') }}">
@@ -57,24 +58,16 @@
                 <!-- [AUTH] Identity source: Easy Auth in Azure, local dev role switcher otherwise -->
                 <li class="nav-item ms-3 pe-1">
                     <span class="nav-link py-0 d-flex align-items-center gap-2">
-                        <i class="fas fa-{% if current_role == 'submitter' %}file-pen{% elif current_role == 'sam' %}user-check{% elif current_role == 'controller' %}calculator{% elif current_role == 'vp' %}user-tie{% elif current_role == 'cfo' %}crown{% elif current_role == 'treasury' %}vault{% elif current_role == 'business_admin' %}user-shield{% elif current_role == 'it_admin' %}laptop-code{% elif current_role == 'treasury_bank_admin' %}building-columns{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
+                        <i class="fas fa-{% if current_roles | length > 1 %}user-shield{% elif current_roles == ['submitter'] %}file-pen{% elif current_roles == ['sam'] %}user-check{% elif current_roles == ['controller'] %}calculator{% elif current_roles == ['vp'] %}user-tie{% elif current_roles == ['cfo'] %}crown{% elif current_roles == ['treasury'] %}vault{% elif current_roles == ['business_admin'] %}user-shield{% elif current_roles == ['it_admin'] %}laptop-code{% elif current_roles == ['treasury_bank_admin'] %}building-columns{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
                         <div class="lh-1">
                             <div class="text-white-50" style="font-size:0.7rem;">{% if auth_source == 'easy_auth' %}Signed in as{% else %}Testing as{% endif %}</div>
                             <div class="text-white fw-semibold" style="font-size:0.8rem;">
-                                {% if current_role == 'sam' %}Sr. Acctg. Manager
-                                {% elif current_role == 'vp' %}Vice President
-                                {% elif current_role == 'cfo' %}CFO
-                                {% elif current_role == 'treasury' %}Treasury Manager
-                                {% elif current_role == 'business_admin' %}Business Admin
-                                {% elif current_role == 'it_admin' %}IT Admin
-                                {% elif current_role == 'treasury_bank_admin' %}Treasury Backup
-                                {% elif current_role %}{{ current_role | capitalize }}
-                                {% else %}Development User{% endif %}
+                                {{ current_roles_display }}
                             </div>
                         </div>
                     </span>
                 </li>
-                {% if current_role and request.endpoint != 'role_select' and can_switch_role %}
+                {% if current_roles and request.endpoint != 'role_select' and can_switch_role %}
                 <li class="nav-item">
                     <a class="nav-link text-white-50 px-2" href="{{ url_for('switch_role') }}" title="Switch role" style="font-size:0.75rem;">
                         <i class="fas fa-right-left me-1"></i>Switch Role

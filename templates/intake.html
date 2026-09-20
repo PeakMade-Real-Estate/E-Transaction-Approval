@@ -28,6 +28,13 @@
 </div>
 {% endif %}
 
+{% if identity_unmapped %}
+<div class="alert alert-danger">
+    <strong><i class="fas fa-ban me-1"></i>Your signed-in account could not be matched to an active AppUser record.</strong>
+    New requests cannot be submitted until this is resolved. Contact an administrator.
+</div>
+{% endif %}
+
 <div class="row g-4">
 
     <!-- ═══════════════════════════════════════════════════════
@@ -36,6 +43,17 @@
     <div class="col-xl-8">
         <form method="POST" action="{{ url_for('intake_submit') }}"
               enctype="multipart/form-data" id="intake-form" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="transaction_key" value="{{ draft.transaction_key if draft else '' }}">
+            <input type="hidden" name="request_id" value="{{ draft.request_id if draft else '' }}">
+
+            {% if draft %}
+            <div class="alert alert-info d-flex align-items-center gap-2">
+                <i class="fas fa-pen"></i>
+                <div><strong>Draft {{ draft.request_id }}</strong> — Save Draft to keep working on it later, or Submit Request to send it into the approval workflow.</div>
+            </div>
+            {% endif %}
+
 
             <!-- ══ SECTION A: Request Overview ═══════════════════════ -->
             <div class="accordion-item form-section-card mb-3 shadow-sm">
@@ -59,7 +77,7 @@
                                 <select class="form-select" id="request_type" name="request_type" required>
                                     <option value="">— Select Type —</option>
                                     {% for t in ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT') %}
-                                    <option value="{{ t }}" {% if request.form.get('request_type') == t %}selected{% endif %}>{{ t }}</option>
+                                    <option value="{{ t }}" {% if (draft.request_type if draft else request.form.get('request_type')) == t %}selected{% endif %}>{{ t }}</option>
                                     {% endfor %}
                                 </select>
                                 <div id="request-type-help"
@@ -72,7 +90,7 @@
                                 <label class="form-label fw-semibold" for="treasury_service_date">
                                     Requested Treasury Service Date <span class="text-danger">*</span>
                                 </label>
-                                <input type="date" class="form-control" value="{{ request.form.get('treasury_service_date', '') }}"
+                                <input type="date" class="form-control" value="{{ draft.treasury_service_date if draft else request.form.get('treasury_service_date', '') }}"
                                        id="treasury_service_date" name="treasury_service_date" required>
                             </div>
 
@@ -107,14 +125,16 @@
                                 <div class="d-flex gap-4 mt-1">
                                     <div class="form-check">
                                         <input class="form-check-input" type="radio"
-                                               name="urgent" id="urgent_yes" value="yes">
+                                               name="urgent" id="urgent_yes" value="yes"
+                                               {% if draft and draft.urgent %}checked{% endif %}>
                                         <label class="form-check-label fw-semibold text-danger" for="urgent_yes">
                                             <i class="fas fa-exclamation-circle me-1"></i>Yes
                                         </label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="radio"
-                                               name="urgent" id="urgent_no" value="no" checked>
+                                               name="urgent" id="urgent_no" value="no"
+                                               {% if not draft or not draft.urgent %}checked{% endif %}>
                                         <label class="form-check-label" for="urgent_no">No</label>
                                     </div>
                                 </div>
@@ -128,15 +148,19 @@
                                 </label>
                                 <textarea class="form-control border-danger" id="urgency_reason"
                                           name="urgency_reason" rows="2"
-                                          placeholder="Describe why this request is urgent (e.g., vendor deadline, penalty avoidance)...">{{ request.form.get('urgency_reason', '') }}</textarea>
+                                          placeholder="Describe why this request is urgent (e.g., vendor deadline, penalty avoidance)...">{{ draft.urgency_reason if draft else request.form.get('urgency_reason', '') }}</textarea>
                             </div>
 
                             <!-- Prepared By -->
                             <div class="col-md-6">
-                                <label class="form-label fw-semibold" for="prepared_by">
+                                <label class="form-label fw-semibold" for="prepared_by_display">
                                     Prepared By <span class="text-danger">*</span>
                                 </label>
-                                {% if users %}
+                                {% if prepared_by_user %}
+                                <input type="text" class="form-control bg-light text-muted" id="prepared_by_display"
+                                       value="{{ prepared_by_user.display_name }}" readonly style="cursor: default;">
+                                <div class="form-text">Automatically set to your signed-in account.</div>
+                                {% elif users %}
                                 <select class="form-select" id="prepared_by" name="prepared_by_key" required>
                                     <option value="">&#8212; Select User &#8212;</option>
                                     {% for u in users %}
@@ -156,6 +180,7 @@
                                 </label>
                                 <input type="date" class="form-control bg-light text-muted" id="prepared_date"
                                        name="prepared_date" readonly required style="cursor: default;">
+                                <div class="form-text">Automatically set to today's date.</div>
                             </div>
 
                             <!-- Property / Department -->
@@ -164,14 +189,14 @@
                                     Property / Department <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="property_dept"
-                                       name="property_dept" value="{{ request.form.get('property_dept', '') }}"
+                                       name="property_dept" value="{{ draft.property_dept if draft else request.form.get('property_dept', '') }}"
                                        placeholder="e.g. Sunset Ridge Apartments" required>
                             </div>
 
                             <!-- Entity ID -->
                             <div class="col-md-4">
                                 <label class="form-label fw-semibold" for="entity_id">Entity ID</label>
-                                <input type="text" class="form-control" id="entity_id" value="{{ request.form.get('entity_id', '') }}"
+                                <input type="text" class="form-control" id="entity_id" value="{{ draft.property_code if draft else request.form.get('entity_id', '') }}"
                                        name="entity_id" placeholder="e.g. SRA-001">
                             </div>
 
@@ -184,7 +209,7 @@
                                 <select class="form-select" id="approver" name="approver_key" required>
                                     <option value="">&#8212; Select Approver &#8212;</option>
                                     {% for u in users %}
-                                    <option value="{{ u.user_key }}">{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" {% if draft and draft.approver_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
                                 {% else %}
@@ -202,7 +227,7 @@
                                 <select class="form-select" id="controller" name="controller_key" required>
                                     <option value="">&#8212; Select Controller &#8212;</option>
                                     {% for u in users %}
-                                    <option value="{{ u.user_key }}">{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" {% if draft and draft.controller_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
                                 {% else %}
@@ -295,6 +320,9 @@
                                 <input type="file" class="form-control" id="file_validation_evidence"
                                        name="file_validation_evidence"
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
+                                {% if existing_attachments and existing_attachments.validation_evidence %}
+                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.validation_evidence }} (select a new file only to replace it)</div>
+                                {% endif %}
                                 <div class="form-text">
                                     Attach the Wells Fargo AVS screenshot, or alternative verification if unavailable.
                                 </div>
@@ -365,7 +393,20 @@
                                     <span><i class="fas fa-check-circle me-2"></i><span id="bank-account-selected-label"></span></span>
                                     <button type="button" class="btn btn-sm btn-outline-success" onclick="clearBankSelection()">Change</button>
                                 </div>
-                                <input type="hidden" name="bank_account_key" id="bank_account_key">
+                                {% if draft and draft.originating_bank_account %}
+                                <div class="alert alert-info py-2 mt-2 mb-0 small">
+                                    <i class="fas fa-university me-1"></i>
+                                    Currently selected:
+                                    <strong>
+                                        {{ draft.originating_bank_account.bank_name }}{% if draft.originating_bank_account.account_title %} &mdash; {{ draft.originating_bank_account.account_title }}{% endif %}
+                                        {% if draft.originating_bank_account.last4 %}&bull;&bull;&bull;&bull; {{ draft.originating_bank_account.last4 }}{% endif %}
+                                    </strong>
+                                    <div class="text-muted">Search above only if you need to change it. If you don't, this account is kept.</div>
+                                </div>
+                                {% elif draft and draft.bank_account_key %}
+                                <div class="form-text">An originating bank account is already on file for this draft. Search above only if you need to change it.</div>
+                                {% endif %}
+                                <input type="hidden" name="bank_account_key" id="bank_account_key" value="{{ draft.bank_account_key if draft else '' }}">
                                 <input type="hidden" name="orig_bank_name" id="orig_bank_name_hidden">
                                 <input type="hidden" name="orig_account_name" id="orig_account_name_hidden">
                             </div>
@@ -434,45 +475,47 @@
                                 <label class="form-label fw-semibold" for="recv_payee_name">
                                     Recipient / Payee Name <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" class="form-control" id="recv_payee_name" value="{{ request.form.get('recv_payee_name', '') }}"
+                                <input type="text" class="form-control" id="recv_payee_name" value="{{ draft.recv_payee_name if draft else request.form.get('recv_payee_name', '') }}"
                                        name="recv_payee_name" placeholder="Legal payee name" required>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_bank_name">
                                     Receiving Bank Name <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" class="form-control" id="recv_bank_name" value="{{ request.form.get('recv_bank_name', '') }}"
+                                <input type="text" class="form-control" id="recv_bank_name" value="{{ draft.recv_bank_name if draft else request.form.get('recv_bank_name', '') }}"
                                        name="recv_bank_name" placeholder="e.g. Chase Bank" required>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_account_name">
                                     Receiving Account Name <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" class="form-control" id="recv_account_name" value="{{ request.form.get('recv_account_name', '') }}"
+                                <input type="text" class="form-control" id="recv_account_name" value="{{ draft.recv_account_name if draft else request.form.get('recv_account_name', '') }}"
                                        name="recv_account_name" placeholder="Account name" required>
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_account_number">
-                                    Receiving Account Number <span class="text-danger">*</span>
+                                    Receiving Account Number {% if not draft %}<span class="text-danger">*</span>{% endif %}
                                 </label>
                                 <input type="text" class="form-control" id="recv_account_number" value="{{ request.form.get('recv_account_number', '') }}"
-                                       name="recv_account_number" placeholder="Enter account number"
-                                       autocomplete="off" required>
+                                       name="recv_account_number" placeholder="{{ draft.recv_account_number_masked if draft else 'Enter account number' }}"
+                                       autocomplete="off" {% if not draft %}required{% endif %}>
+                                {% if draft %}<div class="form-text">Currently on file: {{ draft.recv_account_number_masked }}. Leave blank to keep it.</div>{% endif %}
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_routing_number">
-                                    Receiving Routing Number <span class="text-danger">*</span>
+                                    Receiving Routing Number {% if not draft %}<span class="text-danger">*</span>{% endif %}
                                 </label>
                                 <input type="text" class="form-control" id="recv_routing_number" value="{{ request.form.get('recv_routing_number', '') }}"
-                                       name="recv_routing_number" placeholder="Enter routing number"
-                                       autocomplete="off" required>
+                                       name="recv_routing_number" placeholder="{{ draft.recv_routing_number_masked if draft else 'Enter routing number' }}"
+                                       autocomplete="off" {% if not draft %}required{% endif %}>
+                                {% if draft %}<div class="form-text">Currently on file: {{ draft.recv_routing_number_masked }}. Leave blank to keep it.</div>{% endif %}
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="recv_bank_address">
                                     Receiving Bank / Beneficiary Address
                                     <span id="wire-address-required" class="text-danger" style="display:none;"> *</span>
                                 </label>
-                                <input type="text" class="form-control" id="recv_bank_address" value="{{ request.form.get('recv_bank_address', '') }}"
+                                <input type="text" class="form-control" id="recv_bank_address" value="{{ draft.recv_bank_address if draft else request.form.get('recv_bank_address', '') }}"
                                        name="recv_bank_address"
                                        placeholder="Street, City, State ZIP">
                                 <div id="wire-address-note" class="form-text text-warning fw-semibold" style="display:none;">
@@ -481,17 +524,17 @@
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label" for="recv_contact_name">Recipient Contact Name</label>
-                                <input type="text" class="form-control" id="recv_contact_name" value="{{ request.form.get('recv_contact_name', '') }}"
+                                <input type="text" class="form-control" id="recv_contact_name" value="{{ draft.recv_contact_name if draft else request.form.get('recv_contact_name', '') }}"
                                        name="recv_contact_name" placeholder="Contact name">
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label" for="recv_contact_email">Recipient Contact Email</label>
-                                <input type="email" class="form-control" id="recv_contact_email" value="{{ request.form.get('recv_contact_email', '') }}"
+                                <input type="email" class="form-control" id="recv_contact_email" value="{{ draft.recv_contact_email if draft else request.form.get('recv_contact_email', '') }}"
                                        name="recv_contact_email" placeholder="email@example.com">
                             </div>
                             <div class="col-md-4">
                                 <label class="form-label" for="recv_contact_phone">Recipient Contact Phone</label>
-                                <input type="tel" class="form-control" id="recv_contact_phone" value="{{ request.form.get('recv_contact_phone', '') }}"
+                                <input type="tel" class="form-control" id="recv_contact_phone" value="{{ draft.recv_contact_phone if draft else request.form.get('recv_contact_phone', '') }}"
                                        name="recv_contact_phone" placeholder="(555) 000-0000">
                             </div>
                             <div class="col-12">
@@ -508,6 +551,9 @@
                                 <input type="file" class="form-control" id="file_wire_ach_instructions"
                                        name="file_wire_ach_instructions"
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
+                                {% if existing_attachments and existing_attachments.wire_ach_instructions %}
+                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.wire_ach_instructions }} (select a new file only to replace it)</div>
+                                {% endif %}
                                 <div class="form-text">Attach the ACH or wire instructions provided by the payee or their bank.</div>
                             </div>
 
@@ -536,7 +582,7 @@
                                 </label>
                                 <div class="input-group">
                                     <span class="input-group-text fw-semibold">$</span>
-                                    <input type="number" class="form-control form-control-lg" id="amount" value="{{ request.form.get('amount', '') }}"
+                                    <input type="number" class="form-control form-control-lg" id="amount" value="{{ draft.amount if draft else request.form.get('amount', '') }}"
                                            name="amount" placeholder="0.00" step="0.01" min="0" required>
                                 </div>
                             </div>
@@ -546,7 +592,7 @@
                                 <label class="form-label fw-semibold" for="currency">Currency</label>
                                 <select class="form-select form-select-lg" id="currency" name="currency">
                                     {% for c in ('USD', 'CAD', 'EUR', 'GBP') %}
-                                    <option value="{{ c }}" {% if (request.form.get('currency') or 'USD') == c %}selected{% endif %}>{{ c }}</option>
+                                    <option value="{{ c }}" {% if (draft.currency if draft else (request.form.get('currency') or 'USD')) == c %}selected{% endif %}>{{ c }}</option>
                                     {% endfor %}
                                 </select>
                             </div>
@@ -594,7 +640,7 @@
                                 </label>
                                 <textarea class="form-control" id="payment_purpose"
                                           name="payment_purpose" rows="2"
-                                          placeholder="Describe the purpose of this payment..." required>{{ request.form.get('payment_purpose', '') }}</textarea>
+                                          placeholder="Describe the purpose of this payment..." required>{{ draft.payment_purpose if draft else request.form.get('payment_purpose', '') }}</textarea>
                             </div>
 
                             <div class="col-12">
@@ -605,6 +651,9 @@
                                 <input type="file" class="form-control" id="file_payment_support"
                                        name="file_payment_support"
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.msg,.eml">
+                                {% if existing_attachments and existing_attachments.payment_support %}
+                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.payment_support }} (select a new file only to replace it)</div>
+                                {% endif %}
                                 <div class="form-text">Accepted: invoices, vendor emails, calculations, statements, or any documentation supporting the payment amount and purpose.</div>
                             </div>
 
@@ -660,15 +709,20 @@
             <div class="card border-primary shadow-sm mt-2">
                 <div class="card-body">
                     <div class="d-flex flex-wrap gap-3 align-items-center">
-                        <button type="submit" class="btn btn-primary btn-lg px-5 fw-semibold">
-                            <i class="fas fa-paper-plane me-2"></i>Submit Treasury Request
+                        <button type="submit" name="form_mode" value="submit"
+                                class="btn btn-primary btn-lg px-5 fw-semibold">
+                            <i class="fas fa-paper-plane me-2"></i>Submit Request
+                        </button>
+                        <button type="submit" name="form_mode" value="draft" formnovalidate
+                                class="btn btn-outline-primary btn-lg fw-semibold">
+                            <i class="fas fa-save me-2"></i>Save Draft
                         </button>
                         <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary btn-lg">
                             <i class="fas fa-times me-1"></i>Cancel
                         </a>
                         <div class="ms-auto text-muted small">
                             <i class="fas fa-database me-1"></i>
-                            Submission is written to the SQL database.
+                            {% if draft %}Editing Draft {{ draft.request_id }}.{% else %}Submission is written to the SQL database.{% endif %}
                         </div>
                     </div>
                 </div>
@@ -775,8 +829,25 @@
 
 {% block scripts %}
 <script>
-    // Always default Prepared Date to today
+    // Prepared Date reflects when the request was first prepared (Draft
+    // creation) — default to today only for a brand-new request.
+    {% if draft and draft.prepared_date %}
+    document.getElementById('prepared_date').value = "{{ draft.prepared_date }}";
+    {% else %}
     document.getElementById('prepared_date').value = new Date().toLocaleDateString('en-CA');
+    {% endif %}
+
+    // ── Urgent → show/hide Urgency Reason ───────────────────────
+    function onUrgentChange() {
+        const yes = document.getElementById('urgent_yes');
+        const row = document.getElementById('urgency-reason-row');
+        const reasonField = document.getElementById('urgency_reason');
+        if (!yes || !row) return;
+        row.style.display = yes.checked ? 'block' : 'none';
+        if (reasonField) reasonField.required = yes.checked;
+    }
+    document.querySelectorAll('input[name="urgent"]').forEach(el => el.addEventListener('change', onUrgentChange));
+    onUrgentChange();  // reflect a resumed Draft's stored urgent value on load
 
     // ── Previously Used Instructions → show/hide date picker ────
     function onInstructionsPreviouslyUsedChange() {

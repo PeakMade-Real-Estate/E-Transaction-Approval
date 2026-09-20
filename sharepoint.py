@@ -11,7 +11,11 @@ Library metadata columns (created in SharePoint, per project decision):
     TransactionKey         Number               — join key back to Fabric ETransaction.Transaction_Key
     DocumentSection        Choice               — B - Verification / D - Receiving Banking / E - Transaction / Additional
     DocumentType           Choice               — Validation Evidence / AVS Screenshot / Wire/ACH Instructions /
-                                                    Payment Support / Approval Evidence / Release Confirmation / Other
+                                                    Payment Support / Approval Evidence / Release Confirmation / Other /
+                                                    Treasury Initiation Evidence / Treasury Release Evidence /
+                                                    Bank Release Evidence  (last 3 added Batch 5 — confirm these exact
+                                                    3 Choice values exist in the live SharePoint column; the app writes
+                                                    them exactly as spelled here and does not fall back if rejected)
     UploadedByRole         Choice               — Submitter / SAM / Controller / VP / CFO / Treasury / System
     DocumentStatus         Choice               — Active / Superseded / Rejected
     IsRequiredDocument     Yes/No
@@ -51,7 +55,10 @@ FIELD_IS_REQUIRED     = "IsRequiredDocument"
 FIELD_SOURCE_SYSTEM   = "SourceSystem"
 FIELD_ORIGINAL_NAME   = "OriginalFileName"
 FIELD_CORRELATION_ID  = "AttachmentCorrelationID"
-FIELD_DESCRIPTION     = "Description"
+# SharePoint auto-renamed this column's internal name on creation because
+# "Description" collides with a reserved/built-in field — confirmed live via
+# GET /sites/{id}/lists/{id}/columns (2026-09-19).
+FIELD_DESCRIPTION     = "_ExtendedDescription"
 
 # ─────────────────────────────────────────────────────────────
 #  Choice column values
@@ -70,11 +77,29 @@ DOC_TYPE_APPROVAL_EVIDENCE     = "Approval Evidence"
 DOC_TYPE_RELEASE_CONFIRMATION  = "Release Confirmation"
 DOC_TYPE_OTHER                 = "Other"
 
+# Batch 5: Treasury processing/release evidence — distinct DocumentType values so
+# initiation vs. Corporate release vs. final bank release are never conflated
+# with each other or with the generic "Additional" bucket (see app.py
+# _EVIDENCE_REQUIRED_ACTIONS / request_detail()'s treasury_evidence display).
+DOC_TYPE_TREASURY_INITIATION_EVIDENCE = "Treasury Initiation Evidence"   # Property — Treasury Initiated
+DOC_TYPE_TREASURY_RELEASE_EVIDENCE    = "Treasury Release Evidence"     # Corporate — Treasury Released
+DOC_TYPE_BANK_RELEASE_EVIDENCE        = "Bank Release Evidence"         # Property — final Controller/VP release
+
 # Maps a DocumentType back to the request_detail.html `attachments` dict key it already renders.
 DOC_TYPE_TO_ATTACHMENT_KEY = {
     DOC_TYPE_VALIDATION_EVIDENCE:   "validation_evidence",
     DOC_TYPE_WIRE_ACH_INSTRUCTIONS: "wire_ach_instructions",
     DOC_TYPE_PAYMENT_SUPPORT:       "payment_support",
+}
+
+# Maps the same three Batch 5 evidence DocumentTypes to the request_detail.html
+# `treasury_evidence` dict key — kept separate from DOC_TYPE_TO_ATTACHMENT_KEY
+# so these are never rendered as a generic filename/link, but as their own
+# Treasury Processing / Release Evidence section with uploader/date metadata.
+DOC_TYPE_TO_EVIDENCE_KEY = {
+    DOC_TYPE_TREASURY_INITIATION_EVIDENCE: "treasury_initiation_evidence",
+    DOC_TYPE_TREASURY_RELEASE_EVIDENCE:    "treasury_release_evidence",
+    DOC_TYPE_BANK_RELEASE_EVIDENCE:        "bank_release_evidence",
 }
 
 _SIMPLE_UPLOAD_LIMIT = 4 * 1024 * 1024   # Graph simple PUT-by-path cap

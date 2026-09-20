@@ -32,7 +32,7 @@ class RfiOriginQueryTests(unittest.TestCase):
         executed_sql, executed_params = fake_cursor.execute.call_args[0]
         self.assertIn("Event_Type = ?", executed_sql)
         self.assertNotIn("RequestMoreInfo", executed_sql)
-        self.assertEqual(executed_params, [123, wf.ACTION_MORE_INFO])
+        self.assertEqual(executed_params, [123, wf.EVENT_RFI_REQUESTED])
         self.assertEqual(result, "Pending Controller")
 
     def test_returns_none_when_no_prior_rfi_event(self):
@@ -129,6 +129,7 @@ class WorkflowStageSyncQueryTests(unittest.TestCase):
     def test_advance_transaction_workflow_sets_stage_atomically(self):
         fake_cursor = MagicMock()
         fake_cursor.rowcount = 1
+        fake_cursor.fetchone.return_value = (99,)  # WorkflowAssignment OUTPUT INSERTED.Assignment_Key
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
 
@@ -136,7 +137,7 @@ class WorkflowStageSyncQueryTests(unittest.TestCase):
             db.advance_transaction_workflow(
                 1, from_status=wf.STATUS_PENDING_APPROVER, new_status=wf.STATUS_PENDING_CONTROLLER,
                 new_owner_user_key=5, actor_user_key=2, actor_role="Sr. Accounting Manager",
-                event_type=wf.ACTION_APPROVE, decision="Approved", workflow_role="Controller",
+                action=wf.ACTION_APPROVE, workflow_role="Controller",
             )
 
         update_sql, update_params = fake_cursor.execute.call_args_list[0][0]
@@ -152,15 +153,19 @@ class WorkflowStageSyncQueryTests(unittest.TestCase):
         # insert_transaction() only calls cur.fetchone() after statements that
         # actually consume it: BusinessEntity SELECT, ApprovalRule SELECT,
         # Beneficiary INSERT, BeneficiaryBankInstruction INSERT, ETransaction
-        # INSERT. The TransactionVerification/WorkflowEvent OUTPUT clauses are
-        # never fetched by the current code, so no entries are needed for them.
+        # INSERT, and (Batch 6) the initial Approver WorkflowAssignment INSERT.
+        # ApprovalRule resolution (Batch 7) now uses fetchall(), not fetchone().
+        # The TransactionVerification/WorkflowEvent OUTPUT clauses are never
+        # fetched by the current code, so no entries are needed for them.
         fake_cursor.fetchone.side_effect = [
             (1,),      # Entity_Key
-            None,      # ApprovalRule (none matched)
             (10,),     # Beneficiary_Key
             (20,),     # BeneficiaryInstruction_Key
             (30,),     # Transaction_Key
+            (40,),     # Approver WorkflowAssignment.Assignment_Key
         ]
+        # One matching ApprovalRule: Key=7, Requires_Approver/Controller=True, VP/CFO=False.
+        fake_cursor.fetchall.return_value = [(7, True, True, False, False)]
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
 
@@ -170,7 +175,7 @@ class WorkflowStageSyncQueryTests(unittest.TestCase):
             "bank_account_key": 4, "recv_payee_name": "Payee", "recv_contact_name": "",
             "recv_contact_email": "", "recv_contact_phone": "", "recv_bank_name": "Bank",
             "recv_account_name": "Acct", "recv_account_number": "123", "recv_routing_number": "456",
-            "recv_bank_address": "", "approval_tier": "Senior Accounting Manager / Assistant Controller",
+            "recv_bank_address": "",
             "amount": 100.0, "request_type": "ACH",
         }
         with patch.object(db, "get_connection", return_value=fake_conn):

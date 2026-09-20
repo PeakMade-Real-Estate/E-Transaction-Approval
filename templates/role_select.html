@@ -46,6 +46,33 @@
     </div>
 </div>
 
+{% if dev_mode %}
+<!-- ── Local dev only: Acting-As test AppUser (Batch 7) ───────────── -->
+<div class="row justify-content-center mb-4">
+    <div class="col-lg-6">
+        <div class="card shadow-sm border-0">
+            <div class="card-body">
+                <h6 class="fw-bold mb-2"><i class="fas fa-user-secret me-1"></i>Dev Only: Acting-As Test User</h6>
+                <p class="text-muted small mb-2">
+                    Sets which AppUser Prepared By (and other identity-specific behavior) resolves
+                    to in local development. Has no effect in production (Easy Auth).
+                </p>
+                <form method="post" action="{{ url_for('dev_set_acting_as_user') }}" class="d-flex gap-2">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                    <select name="dev_user_key" class="form-select form-select-sm">
+                        <option value="">&#8212; None (dev bypass) &#8212;</option>
+                        {% for u in dev_users %}
+                        <option value="{{ u.user_key }}" {% if dev_user_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
+                        {% endfor %}
+                    </select>
+                    <button type="submit" class="btn btn-outline-secondary btn-sm text-nowrap">Set</button>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+{% endif %}
+
 <!-- ── Submitter ───────────────────────────────────────────── -->
 {% if 'submitter' in available_roles %}
 <div class="row justify-content-center mb-1">
@@ -55,6 +82,7 @@
     <div class="col-xl-3 col-md-5 col-sm-8">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="submitter">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-submitter text-center p-0">
                 <div class="card-body p-4">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -87,6 +115,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="sam">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-sam text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -111,6 +140,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="controller">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-controller text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -135,6 +165,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="vp">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-vp text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -159,6 +190,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="cfo">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-cfo text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -190,6 +222,7 @@
     <div class="col-xl-3 col-md-5 col-sm-8">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="treasury">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-treasury text-center p-0">
                 <div class="card-body p-4">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -222,6 +255,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="business_admin">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-business_admin text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -245,6 +279,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="it_admin">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-it_admin text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"
@@ -268,6 +303,7 @@
     <div class="col-xl-2 col-md-3 col-sm-6">
         <form method="post" action="{{ url_for('role_select') }}" class="h-100">
             <input type="hidden" name="role" value="treasury_bank_admin">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
             <button type="submit" class="card h-100 border-0 shadow-sm w-100 role-card role-card-treasury_bank_admin text-center p-0">
                 <div class="card-body p-3">
                     <div class="role-icon-circle mx-auto mb-3 d-flex align-items-center justify-content-center"

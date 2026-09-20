@@ -130,22 +130,57 @@ function onLastUsedDateChange() {
     notice.style.display = (!input.value || input.value.trim() === '') ? 'block' : 'none';
 }
 
-// ── Masked Account Toggle (Request Detail) ────────────────────
-function toggleMask(fieldId) {
-    const masked   = document.getElementById(fieldId + '-masked');
-    const unmasked = document.getElementById(fieldId + '-unmasked');
+// ── Sensitive Banking Data Reveal (server-side controlled) ───
+// Replaces the old client-side-only toggleMask(): the real value is never
+// sent to the browser until explicitly requested, is never persisted
+// (no localStorage/sessionStorage/URL), and re-masks on Hide or page reload.
+async function revealBankingField(fieldId, revealUrl, fieldName) {
+    const maskedEl = document.getElementById(fieldId + '-masked');
+    const resultEl = document.getElementById(fieldId + '-result');
     const btn      = document.getElementById(fieldId + '-toggle');
-    if (!masked || !unmasked) return;
+    if (!maskedEl || !resultEl) return;
 
-    const isCurrentlyMasked = masked.style.display !== 'none';
-    if (isCurrentlyMasked) {
-        masked.style.display   = 'none';
-        unmasked.style.display = 'inline';
-        if (btn) btn.innerHTML = '<i class="fas fa-eye-slash me-1"></i>Hide';
-    } else {
-        masked.style.display   = 'inline';
-        unmasked.style.display = 'none';
+    if (resultEl.dataset.revealed === 'true') {
+        resultEl.textContent   = '';
+        resultEl.style.display = 'none';
+        resultEl.dataset.revealed = 'false';
+        maskedEl.style.display = 'inline';
         if (btn) btn.innerHTML = '<i class="fas fa-eye me-1"></i>Reveal';
+        return;
+    }
+
+    if (btn) btn.disabled = true;
+    try {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        const resp = await fetch(revealUrl, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-CSRFToken': csrfToken,
+            },
+            body: 'field=' + encodeURIComponent(fieldName),
+        });
+        let data = {};
+        try { data = await resp.json(); } catch (e) { /* non-JSON error page */ }
+
+        if (resp.status === 403) {
+            resultEl.textContent = 'You are not authorized to reveal this value.';
+            resultEl.style.display = 'inline';
+        } else if (!data.success) {
+            resultEl.textContent = data.reason || 'Unable to reveal this value right now.';
+            resultEl.style.display = 'inline';
+        } else {
+            resultEl.textContent = data.value;
+            resultEl.style.display = 'inline';
+            resultEl.dataset.revealed = 'true';
+            maskedEl.style.display = 'none';
+            if (btn) btn.innerHTML = '<i class="fas fa-eye-slash me-1"></i>Hide';
+        }
+    } catch (e) {
+        resultEl.textContent = 'Unable to reveal this value right now.';
+        resultEl.style.display = 'inline';
+    } finally {
+        if (btn) btn.disabled = false;
     }
 }
 

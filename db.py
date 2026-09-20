@@ -10,11 +10,15 @@ nothing here runs at import time.
 import os
 import struct
 from datetime import datetime
+from decimal import Decimal
 
 import pyodbc
 from azure.identity import ClientSecretCredential
 
-from workflow import STATUS_PENDING_APPROVER, STATUS_COMPLETED, ACTION_MORE_INFO, stage_for_status
+from workflow import STATUS_PENDING_APPROVER, STATUS_COMPLETED, stage_for_status
+import workflow
+import banking_security
+import authorization
 
 # Fixed schema — all app tables live under etransactions
 DB_SCHEMA = "etransactions"
@@ -152,6 +156,15 @@ class WorkflowConflictError(Exception):
     retry, or a concurrent request)."""
 
 
+class ApprovalRuleConfigurationError(Exception):
+    """
+    Raised by resolve_approval_rule() when the live ApprovalRule configuration cannot
+    deterministically route a transaction amount — zero or more than one active rule
+    matched. Fails safely rather than guessing/falling back to hard-coded thresholds
+    (Batch 7 Part 8).
+    """
+
+
 def get_app_user_by_entra_object_id(entra_object_id: str):
     """Resolve the signed-in Easy Auth identity to an AppUser row, or None if not found."""
     if not entra_object_id:
@@ -172,11 +185,83 @@ def get_app_user_by_entra_object_id(entra_object_id: str):
         conn.close()
 
 
+def get_app_user_by_key(user_key):
+    """
+    Resolve an AppUser by User_Key (active only) — used for the local-development
+    "acting as" identity selection (Batch 7 Part 5), a full-record analog of
+    get_app_user_by_entra_object_id() for the dev-mode identity path.
+    """
+    if not user_key:
+        return None
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT User_Key, Display_Name, Email FROM etransactions.AppUser "
+            "WHERE User_Key = ? AND Active_Status = 1",
+            [user_key],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"user_key": row[0], "display_name": row[1], "email": row[2]}
+    finally:
+        conn.close()
+
+
+def resolve_approval_rule(amount):
+    """
+    Resolve the single active ApprovalRule that applies to `amount` — the one
+    source of truth for Controller/VP/CFO routing requirements (Batch 7 Part 8).
+    Uses Decimal for the comparison; never float. Raises
+    ApprovalRuleConfigurationError if zero or more than one active/effective rule
+    matches — never guesses using the old hard-coded Python thresholds.
+    """
+    amount_dec = Decimal(str(amount))
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ApprovalRule_Key, Requires_Approver, Requires_Controller, Requires_VP, Requires_CFO "
+            "FROM etransactions.ApprovalRule "
+            "WHERE Is_Active = 1 AND Min_Amount <= ? AND (Max_Amount IS NULL OR Max_Amount >= ?) "
+            "AND (Effective_Start_Date IS NULL OR Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+            "AND (Effective_End_Date IS NULL OR Effective_End_Date >= CAST(GETDATE() AS DATE))",
+            [amount_dec, amount_dec],
+        )
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+
+    if len(rows) == 0:
+        raise ApprovalRuleConfigurationError(
+            f"No active ApprovalRule matches amount {amount_dec}; submission cannot be routed."
+        )
+    if len(rows) > 1:
+        raise ApprovalRuleConfigurationError(
+            f"Multiple active ApprovalRule rows match amount {amount_dec}; configuration is ambiguous."
+        )
+    row = rows[0]
+    return {
+        "approval_rule_key":   row[0],
+        "requires_approver":   bool(row[1]),
+        "requires_controller": bool(row[2]),
+        "requires_vp":         bool(row[3]),
+        "requires_cfo":        bool(row[4]),
+    }
+
+
 def get_transaction_for_workflow(request_id: str):
     """
     Lean fetch of the raw key/flag columns needed for workflow decisions (no
     display-name joins — see get_request_detail() for the display-oriented fetch).
     Returns None if the request is not found.
+
+    Requires_Controller is read via the transaction's OWN snapshotted
+    ApprovalRule_Key (Batch 7) — not re-resolved against the current amount —
+    so routing always reflects the rule in effect at submission time, even if
+    ApprovalRule configuration changes later. Defaults to True (Controller
+    always required) if the transaction has no linked rule.
     """
     conn = get_connection()
     try:
@@ -188,9 +273,12 @@ def get_transaction_for_workflow(request_id: str):
                 t.PreparedBy_User_Key, t.SelectedApprover_User_Key, t.SelectedController_User_Key,
                 t.VPApprover_User_Key, t.CFOApprover_User_Key, t.CurrentOwner_User_Key,
                 t.BankReleaser_User_Key, t.Requires_VP, t.Requires_CFO, t.Amount,
-                ISNULL(be.Classification, '') AS Entity_Classification
+                ISNULL(be.Classification, '') AS Entity_Classification,
+                be.AccountingGroup_Key,
+                ar.Requires_Controller
             FROM etransactions.ETransaction t
             LEFT JOIN etransactions.BusinessEntity be ON be.Entity_Key = t.Entity_Key
+            LEFT JOIN etransactions.ApprovalRule ar ON ar.ApprovalRule_Key = t.ApprovalRule_Key
             WHERE t.Request_ID = ?
             """,
             [request_id],
@@ -216,8 +304,10 @@ def get_transaction_for_workflow(request_id: str):
         "bank_releaser_user_key":       d["BankReleaser_User_Key"],
         "requires_vp":                  bool(d["Requires_VP"]),
         "requires_cfo":                 bool(d["Requires_CFO"]),
+        "requires_controller":          bool(d["Requires_Controller"]) if d["Requires_Controller"] is not None else True,
         "amount":                       float(d["Amount"] or 0),
         "entity_classification":        d["Entity_Classification"],
+        "accounting_group_key":         d["AccountingGroup_Key"],
     }
 
 
@@ -238,7 +328,7 @@ def get_last_rfi_origin_status(transaction_key):
             WHERE Transaction_Key = ? AND Event_Type = ?
             ORDER BY Event_DateTime DESC
             """,
-            [transaction_key, ACTION_MORE_INFO],
+            [transaction_key, workflow.EVENT_RFI_REQUESTED],
         )
         row = cur.fetchone()
         return row[0] if row else None
@@ -248,7 +338,7 @@ def get_last_rfi_origin_status(transaction_key):
 
 def advance_transaction_workflow(
     transaction_key, *, from_status, new_status, new_owner_user_key,
-    actor_user_key, actor_role, event_type, decision, workflow_role=None,
+    actor_user_key, actor_role, action, workflow_role=None,
     comments=None, bank_releaser_user_key=None,
 ):
     """
@@ -258,9 +348,14 @@ def advance_transaction_workflow(
          against double-click/retry/duplicate processing). Current_Workflow_Stage
          is derived from new_status via workflow.stage_for_status() in this SAME
          statement, so Status/Stage/Owner can never go out of sync with each other.
-      2. Insert a WorkflowEvent row (permanent audit history).
-      3. Close out the prior current WorkflowAssignment and insert a new one for
-         the new owner, preserving assignment history.
+      2. Close out the prior current WorkflowAssignment and insert a new one for
+         the new owner (if any), preserving assignment history.
+      3. Insert one WorkflowEvent row per canonical business event this action
+         produces (workflow.events_for_action(), Batch 6) — e.g. an Approve at
+         Pending Approver writes BOTH APPROVER_APPROVED and CONTROLLER_ASSIGNED,
+         so Power Automate never has to infer the stage from a generic "approve"
+         event. All rows from one call share From_Status/To_Status/timestamp; the
+         human comment (if any) attaches only to the first/primary event.
 
     Raises WorkflowConflictError if the transaction's status no longer matches
     from_status (already advanced by another request) — no rows are written.
@@ -293,16 +388,6 @@ def advance_transaction_workflow(
                 "This transaction has already moved past the expected status; action not applied."
             )
 
-        cur.execute(
-            "INSERT INTO etransactions.WorkflowEvent ("
-            "  Transaction_Key, Actor_User_Key, Actor_Role,"
-            "  Event_Type, Decision, From_Status, To_Status,"
-            "  Event_DateTime, Comments_Reason"
-            ") VALUES (?,?,?,?,?,?,?,?,?)",
-            [transaction_key, actor_user_key, actor_role, event_type, decision,
-             from_status, new_status, now, comments],
-        )
-
         # Close out the prior current assignment regardless; only insert a new
         # one when there is a specific new owner (queue-based stages have none).
         cur.execute(
@@ -310,15 +395,34 @@ def advance_transaction_workflow(
             "WHERE Transaction_Key = ? AND Is_Current = 1",
             [now, transaction_key],
         )
+        new_assignment_key = None
         if new_owner_user_key is not None and workflow_role is not None:
             cur.execute(
                 "INSERT INTO etransactions.WorkflowAssignment ("
                 "  Transaction_Key, Workflow_Role, Assigned_User_Key,"
                 "  Assigned_By_User_Key, Assignment_Source,"
                 "  Assigned_DateTime, Is_Current"
-                ") VALUES (?,?,?,?,?,?,1)",
+                ") OUTPUT INSERTED.Assignment_Key VALUES (?,?,?,?,?,?,1)",
                 [transaction_key, workflow_role, new_owner_user_key,
                  actor_user_key, "Workflow", now],
+            )
+            new_assignment_key = cur.fetchone()[0]
+
+        events = workflow.events_for_action(from_status=from_status, action=action, new_status=new_status)
+        for i, event_type in enumerate(events):
+            # Decision text may be stage-specific (e.g. "Controller Approved") even
+            # though Event_Type stays the established "approve" literal for Power
+            # Automate — see workflow.friendly_event_label().
+            decision = workflow.friendly_event_label(event_type, from_status)
+            related_key = new_assignment_key if event_type in workflow.ASSIGNMENT_LINKED_EVENT_TYPES else None
+            cur.execute(
+                "INSERT INTO etransactions.WorkflowEvent ("
+                "  Transaction_Key, Actor_User_Key, Actor_Role,"
+                "  Event_Type, Decision, From_Status, To_Status,"
+                "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+                [transaction_key, actor_user_key, actor_role, event_type, decision,
+                 from_status, new_status, now, comments if i == 0 else None, related_key],
             )
 
         conn.commit()
@@ -474,8 +578,9 @@ def reassign_transaction_participant(
 #  Query helpers
 # ─────────────────────────────────────────────────────────────
 
-_DASHBOARD_SQL = """
+_DASHBOARD_SQL_BASE = """
 SELECT
+    t.Transaction_Key                          AS transaction_key,
     t.Request_ID                               AS request_id,
     t.Property_Department_Text                 AS property_dept,
     t.Entity_ID_Text                           AS property_code,
@@ -483,6 +588,7 @@ SELECT
     t.Treasury_Service_Date                    AS treasury_service_date,
     t.Prepared_Date                            AS prepared_date,
     t.Submitted_Date                           AS submitted_date,
+    t.Modified_DateTime                        AS last_modified_date,
     t.Amount                                   AS amount,
     t.Currency                                 AS currency,
     t.Payment_Purpose                          AS payment_purpose,
@@ -499,6 +605,7 @@ SELECT
     ISNULL(ctrl.Display_Name,  '')             AS controller,
     ISNULL(vp.Display_Name,    '')             AS vp_approver,
     ISNULL(cfo.Display_Name,   '')             AS cfo_approver,
+    ISNULL(ag.AccountingGroup_Name, '')        AS accounting_group_name,
     DATEDIFF(day, t.Submitted_Date, GETDATE()) AS days_pending
 FROM [etransactions].[ETransaction] t
 LEFT JOIN [etransactions].[AppUser] prep  ON prep.User_Key  = t.PreparedBy_User_Key
@@ -507,16 +614,135 @@ LEFT JOIN [etransactions].[AppUser] sam   ON sam.User_Key   = t.SelectedApprover
 LEFT JOIN [etransactions].[AppUser] ctrl  ON ctrl.User_Key  = t.SelectedController_User_Key
 LEFT JOIN [etransactions].[AppUser] vp    ON vp.User_Key    = t.VPApprover_User_Key
 LEFT JOIN [etransactions].[AppUser] cfo   ON cfo.User_Key   = t.CFOApprover_User_Key
-ORDER BY t.Submitted_Date DESC
+LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = t.Entity_Key
+LEFT JOIN [etransactions].[AccountingGroup] ag ON ag.AccountingGroup_Key = be.AccountingGroup_Key
 """
 
 
-def get_dashboard_records():
-    """[STORAGE] Return all transaction rows shaped for the dashboard. Replaces MOCK_REQUESTS."""
+def _normalize_roles(role) -> set:
+    """Accept a single role code or an iterable of role codes; return a set.
+    Mirrors authorization.normalize_roles()/workflow.normalize_roles() — kept
+    local to avoid a cross-module import (multi-role authorization refactor)."""
+    if isinstance(role, str):
+        return {role}
+    return set(role or [])
+
+
+def _dashboard_scope_where_for_role(role, user_key, accounting_group_key):
+    """
+    Build the (where_clauses, params) for ONE individual role — unchanged
+    rule-for-rule from the original single-role _dashboard_scope_where();
+    extracted so a user's full role set can each be evaluated independently
+    and OR'd together (see _dashboard_scope_where()).
+    """
+    if user_key is None:
+        # Local dev bypass — no per-user identity to scope by; same role+status
+        # relaxation as authorization._dev_bypass_visible().
+        if role == "submitter":
+            return ["1 = 0"], []  # session-stored mock submissions cover this path instead
+        if role == "sam":
+            return ["t.Current_Status = ?"], [workflow.STATUS_PENDING_APPROVER]
+        if role == "controller":
+            return ["t.Current_Status = ?"], [workflow.STATUS_PENDING_CONTROLLER]
+        if role == "vp":
+            return ["t.Current_Status = ?"], [workflow.STATUS_PENDING_VP]
+        if role == "cfo":
+            return ["t.Current_Status = ?"], [workflow.STATUS_PENDING_CFO]
+        if role == "treasury":
+            statuses = list(authorization.TREASURY_VISIBLE_STATUSES)
+            return [f"t.Current_Status IN ({','.join('?' for _ in statuses)})"], statuses
+        if role == "business_admin":
+            return [], []
+        return ["1 = 0"], []
+
+    if role in authorization.UNRESTRICTED_VISIBILITY_ROLES:
+        return [], []
+    if role in authorization.NO_DEFINED_VISIBILITY_ROLES:
+        return ["1 = 0"], []
+    if role == "submitter":
+        return ["t.PreparedBy_User_Key = ?"], [user_key]
+    if role == "sam":
+        return ["t.SelectedApprover_User_Key = ? AND t.Current_Status <> ?"], [user_key, workflow.STATUS_DRAFT]
+    if role == "controller":
+        if accounting_group_key is not None:
+            return ["be.AccountingGroup_Key = ? AND t.Current_Status <> ?"], [accounting_group_key, workflow.STATUS_DRAFT]
+        return ["t.SelectedController_User_Key = ? AND t.Current_Status <> ?"], [user_key, workflow.STATUS_DRAFT]
+    if role == "vp":
+        if accounting_group_key is not None:
+            return ["be.AccountingGroup_Key = ? AND t.Current_Status <> ?"], [accounting_group_key, workflow.STATUS_DRAFT]
+        return ["t.VPApprover_User_Key = ? AND t.Current_Status <> ?"], [user_key, workflow.STATUS_DRAFT]
+    if role == "cfo":
+        if accounting_group_key is not None:
+            return ["be.AccountingGroup_Key = ? AND t.Current_Status <> ?"], [accounting_group_key, workflow.STATUS_DRAFT]
+        return ["t.CFOApprover_User_Key = ? AND t.Current_Status <> ?"], [user_key, workflow.STATUS_DRAFT]
+    if role == "treasury":
+        statuses = list(authorization.TREASURY_VISIBLE_STATUSES)
+        return [f"t.Current_Status IN ({','.join('?' for _ in statuses)})"], statuses
+    return ["1 = 0"], []
+
+
+def _dashboard_scope_where(role, user_key, accounting_group_key):
+    """
+    Build the (where_clauses, params) that restrict the dashboard query to the
+    caller's authorized scope — filtering happens in SQL, never by loading all
+    transactions and filtering in Python. MUST stay logically equivalent to
+    authorization.can_view_transaction() (which additionally re-checks single
+    transactions fetched by direct URL/reveal, since dashboard scoping alone
+    is not sufficient — see Batch 4 report).
+
+    `role` may be a single role code or an iterable of role codes (multi-role
+    authorization refactor) — the effective scope is the UNION of every held
+    role's own individual scope, never a blended/combined condition. If ANY
+    held role is unrestricted (e.g. business_admin), the whole result is
+    unrestricted, since union-with-everything is everything. A single query
+    with one row per Transaction_Key naturally de-duplicates a transaction
+    that happens to qualify under more than one role's clause.
+    """
+    roles = _normalize_roles(role)
+    role_clauses = []
+    for r in roles:
+        where, params = _dashboard_scope_where_for_role(r, user_key, accounting_group_key)
+        if where == []:
+            return [], []  # this role alone is unrestricted -> union is unrestricted
+        role_clauses.append((where, params))
+
+    if not role_clauses:
+        return ["1 = 0"], []
+
+    if len(role_clauses) == 1:
+        # Preserve the exact single-role output shape (list of AND'd clauses,
+        # no extra grouping parens) — behaviorally identical, and keeps the
+        # single-role SQL text unchanged from before this refactor.
+        return role_clauses[0]
+
+    or_parts = []
+    combined_params = []
+    for where, params in role_clauses:
+        or_parts.append("(" + " AND ".join(where) + ")")
+        combined_params.extend(params)
+    return [" OR ".join(or_parts)], combined_params
+
+
+def get_dashboard_records(*, role, user_key, accounting_group_key=None):
+    """
+    Return dashboard-shaped transaction rows already filtered to the caller's
+    authorized scope (Batch 4; unioned across the full role set as of the
+    multi-role authorization refactor) — see _dashboard_scope_where()/
+    authorization.py for the rules. `role` may be a single role code or an
+    iterable of role codes. `accounting_group_key` (Controller/VP/CFO only)
+    must already be validated by the caller as one of THIS user's own
+    authorized groups for at least one of their group-scoped roles.
+    """
+    where, params = _dashboard_scope_where(role, user_key, accounting_group_key)
+    sql = _DASHBOARD_SQL_BASE
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY t.Submitted_Date DESC"
+
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute(_DASHBOARD_SQL)
+        cur.execute(sql, params)
         cols = [c[0] for c in cur.description]
         rows = cur.fetchall()
     finally:
@@ -529,15 +755,92 @@ def get_dashboard_records():
         for key in ("urgent", "over_1m", "requires_vp"):
             d[key] = bool(d.get(key) or False)
         # date/datetime → "YYYY-MM-DD" string
-        for key in ("treasury_service_date", "prepared_date", "submitted_date"):
+        for key in ("treasury_service_date", "prepared_date", "submitted_date", "last_modified_date"):
             val = d.get(key)
             d[key] = val.strftime("%Y-%m-%d") if hasattr(val, "strftime") else (val or "")
         # Decimal → float
         d["amount"] = float(d.get("amount") or 0)
+        # Draft rows have no Submitted_Date, so DATEDIFF returns NULL — coerce
+        # to 0 so the dashboard template's numeric comparison never breaks (Batch 8).
+        d["days_pending"] = d.get("days_pending") or 0
         # alias for templates that reference current_workflow_owner
         d["current_workflow_owner"] = d.get("assigned_approver") or ""
         records.append(d)
     return records
+
+
+def get_user_accounting_group_keys(user_key, role_code=None):
+    """
+    Return the AccountingGroup_Key values `user_key` is authorized for, from
+    AppUserRole (Is_Active=1, currently effective). Returns [] if user_key is
+    None. NOTE: AppUserRole is currently EMPTY in this database (verified
+    live) — this always returns [] today for every user; the query is real
+    and ready for when rows exist (see /memories/repo/schema-facts.md).
+    """
+    if not user_key:
+        return []
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        sql = (
+            "SELECT DISTINCT AccountingGroup_Key FROM etransactions.AppUserRole "
+            "WHERE User_Key = ? AND Is_Active = 1 AND AccountingGroup_Key IS NOT NULL "
+            "AND (Effective_Start_Date IS NULL OR Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+            "AND (Effective_End_Date IS NULL OR Effective_End_Date >= CAST(GETDATE() AS DATE))"
+        )
+        params = [user_key]
+        if role_code:
+            sql += " AND Role_Code = ?"
+            params.append(role_code)
+        cur.execute(sql, params)
+        return [r[0] for r in cur.fetchall() if r[0] is not None]
+    finally:
+        conn.close()
+
+
+def get_accounting_groups_by_keys(group_keys):
+    """Return {AccountingGroup_Key, AccountingGroup_Name} for the given keys, for dashboard scope UI."""
+    if not group_keys:
+        return []
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        placeholders = ",".join("?" for _ in group_keys)
+        cur.execute(
+            f"SELECT AccountingGroup_Key, AccountingGroup_Name FROM etransactions.AccountingGroup "
+            f"WHERE AccountingGroup_Key IN ({placeholders}) ORDER BY AccountingGroup_Name",
+            list(group_keys),
+        )
+        return [{"accounting_group_key": r[0], "name": r[1]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_app_user_role_codes(user_key):
+    """
+    Return the distinct, currently-effective Role_Code values `user_key` holds
+    in AppUserRole (Is_Active=1, within any Effective_Start/End_Date window).
+    Used ONLY by the local dev "Acting As" simulation (app.current_roles()) to
+    approximate the full Entra App Role set a real user would have in
+    production — production itself never reads AppUserRole for role grants
+    (Entra is the sole functional-role authority; see
+    e_transaction_multi_role_authorization_refactor.md Part 3/8).
+    """
+    if not user_key:
+        return []
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT Role_Code FROM etransactions.AppUserRole "
+            "WHERE User_Key = ? AND Is_Active = 1 "
+            "AND (Effective_Start_Date IS NULL OR Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+            "AND (Effective_End_Date IS NULL OR Effective_End_Date >= CAST(GETDATE() AS DATE))",
+            [user_key],
+        )
+        return [r[0] for r in cur.fetchall() if r[0]]
+    finally:
+        conn.close()
 
 
 _DETAIL_SQL = """
@@ -622,7 +925,8 @@ SELECT
     we.To_Status,
     we.Event_DateTime,
     we.Comments_Reason,
-    ISNULL(u.Display_Name, we.Actor_Role) AS actor_name
+    ISNULL(u.Display_Name, we.Actor_Role) AS actor_name,
+    we.From_Status
 FROM [etransactions].[WorkflowEvent] we
 LEFT JOIN [etransactions].[AppUser] u ON u.User_Key = we.Actor_User_Key
 WHERE we.Transaction_Key = (
@@ -644,18 +948,28 @@ WHERE tc.Transaction_Key = (
 ORDER BY tc.Created_DateTime ASC
 """
 
-# Maps lowercase/stripped Event_Type values to template dot CSS class names
+# Maps a normalized (lowercased, spaces/underscores stripped — see the lookup
+# call in get_request_detail()) Event_Type to a template dot CSS class name.
+# Anything unrecognized falls back to the neutral "routed" dot so old/
+# unexpected values never break rendering.
 _EVENT_TYPE_MAP = {
-    "submitted":        "submitted",
-    "approved":         "approve",
-    "rejected":         "reject",
-    "moreinfo":         "more_info",
-    "moreinformation":  "more_info",
-    "more_info":        "more_info",
-    "treasuryreviewed": "treasury_reviewed",
-    "released":         "mark_released",
-    "completed":        "mark_completed",
-    "reassign":         "reassign",
+    # Established Event_Type literals (unchanged since before Batch 6), normalized
+    "submitted":          "submitted",
+    "approve":            "approve",
+    "cancel":             "reject",
+    "moreinfo":           "more_info",
+    "requesterrespond":   "more_info",
+    "reassign":           "reassign",
+    "treasuryinitiated":  "treasury_reviewed",
+    "treasuryreleased":   "mark_completed",
+    "bankrelease":        "mark_completed",
+    "markcompleted":      "mark_completed",
+    # New additive Event_Type values (Batch 6), normalized
+    "approverassigned":   "routed",
+    "controllerassigned": "routed",
+    "vpassigned":         "routed",
+    "cfoassigned":        "routed",
+    "readyfortreasury":   "treasury_reviewed",
 }
 
 
@@ -715,13 +1029,18 @@ def get_request_detail(request_id: str):
     # Build timeline list
     timeline = []
     for r in timeline_rows:
-        evt_type  = r[0] or ""
-        actor     = r[6]        # actor_name (Display_Name or Actor_Role fallback)
-        to_status = r[3] or ""
-        evt_dt    = r[4]
+        evt_type    = r[0] or ""
+        actor       = r[6]        # actor_name (Display_Name or Actor_Role fallback)
+        to_status   = r[3] or ""
+        from_status = r[7] or ""
+        evt_dt      = r[4]
         evt_date  = evt_dt.strftime("%Y-%m-%d") if hasattr(evt_dt, "strftime") else str(evt_dt or "")
         dot_type  = _EVENT_TYPE_MAP.get(evt_type.lower().replace(" ", "").replace("_", ""), "routed")
-        event_label = f"{evt_type} by {actor}" if actor else evt_type
+        # Stage-aware friendly label (e.g. "Controller Approved") even though
+        # Event_Type itself stays the established "approve" literal for Power
+        # Automate — see workflow.friendly_event_label().
+        friendly_type = workflow.friendly_event_label(evt_type, from_status)
+        event_label = f"{friendly_type} by {actor}" if actor else friendly_type
         timeline.append({"date": evt_date, "event": event_label, "status": to_status, "type": dot_type})
     d["timeline"] = timeline
 
@@ -1163,7 +1482,82 @@ def get_bank_account_record(bank_account_key: int):
             val = record.get(key)
             record[key] = val.strftime("%Y-%m-%d") if hasattr(val, "strftime") else (val or "")
         record["status"] = _status_for_display(record.get("status"))
+        # Application-layer masking — do not depend on DDM alone (banking_security.py).
+        record["accountnumber"]          = banking_security.mask_field("account_number", record.get("accountnumber"))
+        record["routingnumber"]          = banking_security.mask_field("routing_number", record.get("routingnumber"))
+        record["taxidnumber"]            = banking_security.mask_field("tax_id", record.get("taxidnumber"))
+        record["transitnumbercanada"]    = banking_security.mask_field("transit_number", record.get("transitnumbercanada"))
+        record["institutionnumbercanada"] = banking_security.mask_field("institution_number", record.get("institutionnumbercanada"))
         return record
+    finally:
+        conn.close()
+
+
+_REVEALABLE_BANK_ACCOUNT_COLUMNS = frozenset(banking_security.REVEALABLE_BANK_ACCOUNT_FIELDS.values())
+_REVEALABLE_BENEFICIARY_COLUMNS = frozenset(banking_security.REVEALABLE_BENEFICIARY_FIELDS.values())
+
+
+def get_bank_account_sensitive_field(bank_account_key: int, column_name: str):
+    """
+    Return the single raw column value for one allow-listed sensitive
+    BankAccount field, or None if the account doesn't exist. `column_name`
+    MUST be one of banking_security.REVEALABLE_BANK_ACCOUNT_FIELDS' values —
+    callers must never pass a client-supplied column name straight through;
+    this is re-validated here as defense in depth even though app.py's route
+    already validates against the same allow-list.
+    """
+    if column_name not in _REVEALABLE_BANK_ACCOUNT_COLUMNS:
+        raise ValueError(f"Unsupported column for reveal: {column_name}")
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {column_name} FROM etransactions.BankAccount WHERE BankAccount_Key = ?",
+            [bank_account_key],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_beneficiary_instruction_sensitive_field(beneficiary_instruction_key: int, column_name: str):
+    """Same as get_bank_account_sensitive_field(), for BeneficiaryBankInstruction's two revealable fields."""
+    if column_name not in _REVEALABLE_BENEFICIARY_COLUMNS:
+        raise ValueError(f"Unsupported column for reveal: {column_name}")
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            f"SELECT {column_name} FROM etransactions.BeneficiaryBankInstruction "
+            "WHERE BeneficiaryInstruction_Key = ?",
+            [beneficiary_instruction_key],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
+def get_transaction_banking_keys(request_id: str):
+    """
+    Return {"originating_bank_account_key", "beneficiary_instruction_key"} for a
+    transaction, or None if not found. Lets reveal routes resolve the real
+    BankAccount_Key/BeneficiaryInstruction_Key server-side from Request_ID —
+    never trusting a client-supplied key directly.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT OriginatingBankAccount_Key, BeneficiaryInstruction_Key "
+            "FROM etransactions.ETransaction WHERE Request_ID = ?",
+            [request_id],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"originating_bank_account_key": row[0], "beneficiary_instruction_key": row[1]}
     finally:
         conn.close()
 
@@ -1320,6 +1714,12 @@ def insert_transaction(data: dict) -> str:
     now   = _dt.now()
     today = now.date()
 
+    # Resolve the applicable ApprovalRule BEFORE opening the transactional
+    # connection below — a pure read; raises ApprovalRuleConfigurationError if
+    # the live configuration cannot deterministically route this amount
+    # (Batch 7 Part 8) — no fallback to hard-coded Python thresholds.
+    rule = resolve_approval_rule(data["amount"])
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -1329,15 +1729,6 @@ def insert_transaction(data: dict) -> str:
             "SELECT TOP 1 Entity_Key FROM [etransactions].[BusinessEntity] WHERE Active_Status = 1"
         )
         entity_key = cur.fetchone()[0]
-
-        # Look up ApprovalRule by amount thresholds
-        cur.execute(
-            "SELECT ApprovalRule_Key FROM [etransactions].[ApprovalRule] "
-            "WHERE Is_Active = 1 AND Min_Amount <= ? AND (Max_Amount IS NULL OR Max_Amount >= ?)",
-            [data["amount"], data["amount"]],
-        )
-        rule_row = cur.fetchone()
-        rule_key = rule_row[0] if rule_row else None
 
         # Insert Beneficiary (payee)
         cur.execute(
@@ -1365,13 +1756,15 @@ def insert_transaction(data: dict) -> str:
         # Use the caller's pre-reserved Request_ID if provided, else generate one now.
         request_id = data.get("request_id") or _generate_unique_request_id(cur)
 
-        tier           = data["approval_tier"]
-        # Every transaction starts at Pending Approver regardless of tier — the
-        # tier only determines which LATER stages (VP/CFO) are additionally
-        # required. See workflow.py for the full additive routing model.
-        initial_status = STATUS_PENDING_APPROVER
-        requires_vp    = tier in ("Vice President", "Vice President + CFO")
-        requires_cfo   = tier == "Vice President + CFO"
+        # Every transaction starts at Pending Approver regardless of the resolved
+        # rule — the rule only determines which LATER stages (Controller/VP/CFO)
+        # are additionally required. Single source of truth: the ApprovalRule row
+        # resolved above (rule), never data.get("approval_tier")/mock_data thresholds.
+        initial_status  = STATUS_PENDING_APPROVER
+        rule_key        = rule["approval_rule_key"]
+        requires_vp     = rule["requires_vp"]
+        requires_cfo    = rule["requires_cfo"]
+        tier            = workflow.approval_tier_label(requires_vp=requires_vp, requires_cfo=requires_cfo)
 
         # Insert ETransaction
         cur.execute(
@@ -1455,26 +1848,518 @@ def insert_transaction(data: dict) -> str:
             ],
         )
 
-        # Insert WorkflowEvent — Submitted
+        # Insert initial WorkflowAssignment — Approver is the first actionable owner
+        # (Batch 6: previously no assignment row existed until the first workflow
+        # transition; APPROVER_ASSIGNED now has a real Related_Assignment_Key).
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowAssignment] ("
+            "  Transaction_Key, Workflow_Role, Assigned_User_Key,"
+            "  Assigned_By_User_Key, Assignment_Source,"
+            "  Assigned_DateTime, Is_Current"
+            ") OUTPUT INSERTED.Assignment_Key VALUES (?,?,?,?,?,?,1)",
+            [txn_key, "Approver", data["approver_key"], data["prepared_by_key"], "Workflow", now],
+        )
+        approver_assignment_key = cur.fetchone()[0]
+
+        # Insert WorkflowEvent — REQUEST_SUBMITTED
         cur.execute(
             "INSERT INTO [etransactions].[WorkflowEvent] ("
             "  Transaction_Key, Actor_User_Key, Actor_Role,"
             "  Event_Type, Decision, From_Status, To_Status,"
-            "  Event_DateTime, Comments_Reason"
-            ") OUTPUT INSERTED.WorkflowEvent_Key VALUES (?,?,?,?,?,?,?,?,?)",
+            "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+            ") OUTPUT INSERTED.WorkflowEvent_Key VALUES (?,?,?,?,?,?,?,?,?,?)",
             [
                 txn_key,
                 data["prepared_by_key"],
                 "Submitter",
-                "Submitted", "Submitted",
+                workflow.EVENT_REQUEST_SUBMITTED, workflow.EVENT_TYPE_LABELS[workflow.EVENT_REQUEST_SUBMITTED],
                 None, initial_status,
-                now, None,
+                now, None, None,
+            ],
+        )
+
+        # Insert WorkflowEvent — APPROVER_ASSIGNED (Batch 6: Approver is the first
+        # actionable owner; Controller/VP/CFO are not assigned yet, so no
+        # corresponding assignment event is created for them at submission).
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowEvent] ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+            ") OUTPUT INSERTED.WorkflowEvent_Key VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                txn_key,
+                data["prepared_by_key"],
+                "Submitter",
+                workflow.EVENT_APPROVER_ASSIGNED, workflow.EVENT_TYPE_LABELS[workflow.EVENT_APPROVER_ASSIGNED],
+                None, initial_status,
+                now, None, approver_assignment_key,
             ],
         )
 
         conn.commit()
         return request_id
 
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+class DraftNotEditableError(Exception):
+    """
+    Raised by update_draft()/get_draft_for_edit()/finalize_draft_submission()
+    when the target transaction cannot be edited: it does not exist, is not
+    owned by the requesting AppUser, or is no longer Current_Status='Draft'
+    (e.g. already submitted, cancelled, completed). Both existence/ownership
+    and status are checked together server-side — never inferred from a
+    client-supplied transaction_key alone (Batch 8 Part 3/14).
+    """
+
+
+# Fields intake.html may submit for a Draft — everything the live ETransaction/
+# Beneficiary/BeneficiaryBankInstruction schema requires NOT NULL with no safe
+# non-fake default (see create_draft() docstring for the schema limitation this
+# reflects). Amount/dates are parsed defensively; FK fields are validated to
+# actually exist by the caller (app.py) before reaching here.
+_DRAFT_REQUIRED_FIELDS = (
+    "recv_payee_name", "recv_bank_name", "recv_account_number",
+    "bank_account_key", "approver_key", "controller_key",
+    "request_type", "treasury_service_date", "amount",
+)
+
+
+def create_draft(data: dict):
+    """
+    Create a new Draft transaction (Batch 8) — persists only what the requester
+    has entered so far. Does NOT create TransactionVerification, an initial
+    WorkflowAssignment, or any WorkflowEvent — a Draft has not entered the
+    approval workflow and must never trigger a Power Automate notification.
+    Returns (request_id, transaction_key).
+
+    SCHEMA LIMITATION (see Batch 8 report): OriginatingBankAccount_Key,
+    Beneficiary_Key/BeneficiaryInstruction_Key (and their NOT NULL Payee_Name/
+    Receiving_Bank_Name/Receiving_Account_Number columns), SelectedApprover_User_Key,
+    SelectedController_User_Key, Treasury_Service_Date, and Amount are all
+    NOT NULL on ETransaction with no safe non-fake default available — a Draft
+    cannot be saved before _DRAFT_REQUIRED_FIELDS are all supplied. This is the
+    practical minimum the CURRENT live schema allows without inventing
+    placeholder business data (e.g. Amount=0, an arbitrary BankAccount, a "TBD"
+    payee). Everything else (attachments, urgency reason, wire address, AVS/
+    verification, currency, property/department, payment purpose, VP/CFO/
+    contact fields) may be blank.
+    """
+    now = datetime.now()
+    today = now.date()
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT TOP 1 Entity_Key FROM [etransactions].[BusinessEntity] WHERE Active_Status = 1"
+        )
+        entity_key_row = cur.fetchone()
+        entity_key = entity_key_row[0] if entity_key_row else None
+
+        cur.execute(
+            "INSERT INTO [etransactions].[Beneficiary] "
+            "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
+            "OUTPUT INSERTED.Beneficiary_Key VALUES (?, ?, ?, ?)",
+            [data["recv_payee_name"], data.get("recv_contact_name", ""),
+             data.get("recv_contact_email", ""), data.get("recv_contact_phone", "")],
+        )
+        ben_key = cur.fetchone()[0]
+
+        cur.execute(
+            "INSERT INTO [etransactions].[BeneficiaryBankInstruction] "
+            "(Beneficiary_Key, Receiving_Bank_Name, Receiving_Account_Name, "
+            " Receiving_Account_Number, Receiving_Routing_Number, "
+            " Bank_Beneficiary_Address, Is_Current, Effective_From) "
+            "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+            [ben_key, data["recv_bank_name"], data.get("recv_account_name", ""),
+             data["recv_account_number"], data.get("recv_routing_number", ""),
+             data.get("recv_bank_address", ""), today],
+        )
+        bi_key = cur.fetchone()[0]
+
+        request_id = data.get("request_id") or _generate_unique_request_id(cur)
+
+        cur.execute(
+            "INSERT INTO [etransactions].[ETransaction] ("
+            "  Request_ID, PreparedBy_User_Key,"
+            "  Entity_Key, Property_Department_Text, Entity_ID_Text,"
+            "  OriginatingBankAccount_Key, Beneficiary_Key, BeneficiaryInstruction_Key,"
+            "  SelectedApprover_User_Key, SelectedController_User_Key,"
+            "  CurrentOwner_User_Key,"
+            "  Request_Type, Treasury_Service_Date, Prepared_Date,"
+            "  Amount, Currency, Payment_Purpose,"
+            "  Urgent_Flag, Urgency_Reason,"
+            "  Current_Status, Current_Workflow_Stage,"
+            "  Requires_VP, Requires_CFO,"
+            "  Created_DateTime, Modified_DateTime"
+            ") OUTPUT INSERTED.Transaction_Key"
+            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                request_id, data["prepared_by_key"],
+                entity_key, data.get("property_dept", ""), data.get("property_code", ""),
+                data["bank_account_key"], ben_key, bi_key,
+                data["approver_key"], data["controller_key"],
+                data["prepared_by_key"],  # requester owns the actionable work while drafting
+                data["request_type"], data["treasury_service_date"], today,
+                data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
+                1 if data.get("urgent") else 0, data.get("urgency_reason", ""),
+                workflow.STATUS_DRAFT, stage_for_status(workflow.STATUS_DRAFT),
+                0, 0,
+                now, now,
+            ],
+        )
+        txn_key = cur.fetchone()[0]
+
+        conn.commit()
+        return request_id, txn_key
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
+    """
+    Update an existing Draft in place (Batch 8) — never inserts a new
+    Beneficiary/BeneficiaryBankInstruction/ETransaction row; Transaction_Key
+    remains the durable identity across repeated Save Draft clicks.
+
+    Guarded by ownership + Current_Status='Draft' — raises DraftNotEditableError
+    if the transaction doesn't exist, isn't owned by prepared_by_user_key, or is
+    no longer a Draft (already submitted/cancelled/completed).
+
+    Receiving account/routing numbers use the same blank-preserves-existing
+    pattern as bank_account edits (Batch 3): a blank value here means "keep the
+    currently stored value" — the caller (app.py) is responsible for never
+    passing back a DDM-masked placeholder as if it were a real edited value.
+    """
+    now = datetime.now()
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT Beneficiary_Key, BeneficiaryInstruction_Key FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
+        ben_key, bi_key = row
+
+        cur.execute(
+            "UPDATE [etransactions].[Beneficiary] "
+            "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
+            "WHERE Beneficiary_Key = ?",
+            [data["recv_payee_name"], data.get("recv_contact_name", ""),
+             data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
+        )
+
+        bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+        bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+        # Blank account/routing number means "keep the existing stored value" —
+        # never overwrite a real value with a blank/placeholder (Batch 3 principle).
+        if (data.get("recv_account_number") or "").strip():
+            bi_set.append("Receiving_Account_Number = ?")
+            bi_params.append(data["recv_account_number"])
+        if (data.get("recv_routing_number") or "").strip():
+            bi_set.append("Receiving_Routing_Number = ?")
+            bi_params.append(data["recv_routing_number"])
+        bi_params.append(bi_key)
+        cur.execute(
+            f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
+            "WHERE BeneficiaryInstruction_Key = ?",
+            bi_params,
+        )
+
+        cur.execute(
+            "UPDATE [etransactions].[ETransaction] SET"
+            "  Property_Department_Text = ?, Entity_ID_Text = ?,"
+            "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
+            "  Request_Type = ?, Treasury_Service_Date = ?,"
+            "  Amount = ?, Currency = ?, Payment_Purpose = ?,"
+            "  Urgent_Flag = ?, Urgency_Reason = ?, Modified_DateTime = ?"
+            " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [
+                data.get("property_dept", ""), data.get("property_code", ""),
+                data["bank_account_key"], data["approver_key"], data["controller_key"],
+                data["request_type"], data["treasury_service_date"],
+                data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
+                1 if data.get("urgent") else 0, data.get("urgency_reason", ""), now,
+                transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT,
+            ],
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
+
+        conn.commit()
+    except DraftNotEditableError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
+    """
+    Return a Draft's stored fields for populating the intake form on Resume, or
+    None if not found/not owned/not a Draft. Receiving account/routing numbers
+    are only ever returned masked (banking_security) — never raw — consistent
+    with Batch 3; the intake form must treat a blank input as "keep existing"
+    rather than re-saving a masked placeholder as if it were real (see
+    update_draft()).
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT t.Transaction_Key, t.Request_ID, t.Property_Department_Text, t.Entity_ID_Text,
+                   t.OriginatingBankAccount_Key, t.SelectedApprover_User_Key, t.SelectedController_User_Key,
+                   t.Request_Type, t.Treasury_Service_Date, t.Amount, t.Currency, t.Payment_Purpose,
+                   t.Urgent_Flag, t.Urgency_Reason, t.Prepared_Date,
+                   b.Payee_Name, b.Contact_Name, b.Contact_Email, b.Contact_Phone,
+                   bi.Receiving_Bank_Name, bi.Receiving_Account_Name,
+                   bi.Receiving_Account_Number, bi.Receiving_Routing_Number, bi.Bank_Beneficiary_Address
+            FROM [etransactions].[ETransaction] t
+            JOIN [etransactions].[Beneficiary] b ON b.Beneficiary_Key = t.Beneficiary_Key
+            JOIN [etransactions].[BeneficiaryBankInstruction] bi ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
+            WHERE t.Transaction_Key = ? AND t.PreparedBy_User_Key = ? AND t.Current_Status = ?
+            """,
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        cols = [c[0] for c in cur.description]
+        d = dict(zip(cols, row))
+    finally:
+        conn.close()
+
+    return {
+        "transaction_key":  d["Transaction_Key"],
+        "request_id":       d["Request_ID"],
+        "property_dept":    d["Property_Department_Text"] or "",
+        "property_code":    d["Entity_ID_Text"] or "",
+        "bank_account_key": d["OriginatingBankAccount_Key"],
+        "approver_key":     d["SelectedApprover_User_Key"],
+        "controller_key":   d["SelectedController_User_Key"],
+        "request_type":     d["Request_Type"] or "",
+        "treasury_service_date": d["Treasury_Service_Date"].strftime("%Y-%m-%d") if d["Treasury_Service_Date"] else "",
+        "amount":           float(d["Amount"] or 0),
+        "currency":         d["Currency"] or "USD",
+        "payment_purpose":  d["Payment_Purpose"] or "",
+        "urgent":           bool(d["Urgent_Flag"]),
+        "urgency_reason":   d["Urgency_Reason"] or "",
+        "prepared_date":    d["Prepared_Date"].strftime("%Y-%m-%d") if d["Prepared_Date"] else "",
+        "recv_payee_name":    d["Payee_Name"] or "",
+        "recv_contact_name":  d["Contact_Name"] or "",
+        "recv_contact_email": d["Contact_Email"] or "",
+        "recv_contact_phone": d["Contact_Phone"] or "",
+        "recv_bank_name":     d["Receiving_Bank_Name"] or "",
+        "recv_account_name":  d["Receiving_Account_Name"] or "",
+        "recv_bank_address":  d["Bank_Beneficiary_Address"] or "",
+        "recv_account_number_masked": banking_security.mask_account_number(d["Receiving_Account_Number"] or ""),
+        "recv_routing_number_masked": banking_security.mask_routing_number(d["Receiving_Routing_Number"] or ""),
+        "originating_bank_account": _draft_originating_bank_account_summary(d["OriginatingBankAccount_Key"]),
+    }
+
+
+def _draft_originating_bank_account_summary(bank_account_key):
+    """
+    Safe, masked display summary of a Draft's already-selected originating
+    BankAccount for Resume (Batch 8 follow-up Part 2) — bank name/account
+    title/last 4 digits only, never the full account/routing number.
+    """
+    if not bank_account_key:
+        return None
+    record = get_bank_account_record(bank_account_key)
+    if record is None:
+        return None
+    masked = record.get("accountnumber") or ""
+    last4 = masked[-4:] if len(masked) >= 4 else ""
+    title = record.get("accounttitle") or record.get("accountnameid") or record.get("systemaccountname") or ""
+    return {
+        "bank_name": record.get("bankname") or "",
+        "account_title": title,
+        "last4": last4,
+    }
+
+
+def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_key):
+    """
+    Convert an existing Draft into a normal submitted transaction (Batch 8) —
+    the SAME Transaction_Key/Request_ID, never a second row. Caller (app.py)
+    must have already run the full Batch 1 final-submission validator and
+    Batch 7 resolve_approval_rule() before calling this — this function only
+    persists the already-validated result, atomically:
+      1. Update Beneficiary/BeneficiaryBankInstruction with final values.
+      2. Update ETransaction: Status/Stage -> Pending Approver, CurrentOwner ->
+         Approver, ApprovalRule_Key/Requires_VP/Requires_CFO/Approval_Tier_Snapshot,
+         Submitted_Date = now. Guarded by PreparedBy_User_Key + Current_Status='Draft'
+         (also protects against double-submit — a second call after the first
+         succeeds finds Current_Status no longer 'Draft' and raises
+         WorkflowConflictError, same optimistic-concurrency pattern as
+         advance_transaction_workflow()).
+      3. Insert TransactionVerification (first time — a Draft never has one).
+      4. Insert the initial "Approver" WorkflowAssignment.
+      5. Insert WorkflowEvent rows: Submitted, APPROVER_ASSIGNED (Batch 6
+         contract, unchanged — no DRAFT_SAVED event exists or is needed).
+
+    Raises WorkflowConflictError if the transaction is not (still) an owned
+    Draft — no rows are written.
+    """
+    now = datetime.now()
+    today = now.date()
+    initial_status = workflow.STATUS_PENDING_APPROVER
+
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        cur.execute(
+            "SELECT Beneficiary_Key, BeneficiaryInstruction_Key FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise WorkflowConflictError(
+                "This draft could not be found, is not yours, or has already been submitted."
+            )
+        ben_key, bi_key = row
+
+        cur.execute(
+            "UPDATE [etransactions].[Beneficiary] "
+            "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
+            "WHERE Beneficiary_Key = ?",
+            [data["recv_payee_name"], data.get("recv_contact_name", ""),
+             data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
+        )
+        bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+        bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+        if (data.get("recv_account_number") or "").strip():
+            bi_set.append("Receiving_Account_Number = ?")
+            bi_params.append(data["recv_account_number"])
+        if (data.get("recv_routing_number") or "").strip():
+            bi_set.append("Receiving_Routing_Number = ?")
+            bi_params.append(data["recv_routing_number"])
+        bi_params.append(bi_key)
+        cur.execute(
+            f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
+            "WHERE BeneficiaryInstruction_Key = ?",
+            bi_params,
+        )
+
+        cur.execute(
+            "UPDATE [etransactions].[ETransaction] SET"
+            "  Property_Department_Text = ?, Entity_ID_Text = ?,"
+            "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
+            "  CurrentOwner_User_Key = ?, ApprovalRule_Key = ?,"
+            "  Request_Type = ?, Treasury_Service_Date = ?, Submitted_Date = ?,"
+            "  Amount = ?, Currency = ?, Payment_Purpose = ?,"
+            "  Urgent_Flag = ?, Urgency_Reason = ?,"
+            "  Current_Status = ?, Current_Workflow_Stage = ?,"
+            "  Approval_Tier_Snapshot = ?, Requires_VP = ?, Requires_CFO = ?,"
+            "  Modified_DateTime = ?"
+            " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [
+                data.get("property_dept", ""), data.get("property_code", ""),
+                data["bank_account_key"], data["approver_key"], data["controller_key"],
+                data["approver_key"], data["approval_rule_key"],
+                data["request_type"], data["treasury_service_date"], now,
+                data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
+                1 if data.get("urgent") else 0, data.get("urgency_reason", ""),
+                initial_status, stage_for_status(initial_status),
+                data["approval_tier"], 1 if data["requires_vp"] else 0, 1 if data["requires_cfo"] else 0,
+                now,
+                transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT,
+            ],
+        )
+        if cur.rowcount == 0:
+            conn.rollback()
+            raise WorkflowConflictError(
+                "This draft could not be found, is not yours, or has already been submitted."
+            )
+
+        cur.execute(
+            "INSERT INTO [etransactions].[TransactionVerification] ("
+            "  Transaction_Key,"
+            "  Instructions_Previously_Used, Last_Used_Date, Prior_Transaction_Key,"
+            "  Verbal_Confirmed,"
+            "  Confirmed_With_KnownContact_Flag, Confirmed_With_Requester_Flag,"
+            "  Verbal_Contact_Name, Verbal_Confirm_DateTime,"
+            "  AVS_Score, External_Source_Flag, Internal_Doc_Not_Used_Flag,"
+            "  Verified_By_User_Key, Created_DateTime"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            [
+                transaction_key,
+                1 if data.get("instructions_previously_used") else 0,
+                data.get("last_used_date") or None,
+                data.get("prior_transaction_key") or None,
+                1 if data.get("verbal_confirmed") else 0,
+                1 if data.get("verbal_known_contact") else 0,
+                1 if data.get("verbal_requester") else 0,
+                data.get("verbal_contact_name", ""),
+                data.get("verbal_confirm_datetime") or None,
+                data.get("avs_score") or None,
+                1 if data.get("external_source") else 0,
+                1 if data.get("internal_doc_not_used") else 0,
+                prepared_by_user_key,
+                now,
+            ],
+        )
+
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowAssignment] ("
+            "  Transaction_Key, Workflow_Role, Assigned_User_Key,"
+            "  Assigned_By_User_Key, Assignment_Source,"
+            "  Assigned_DateTime, Is_Current"
+            ") OUTPUT INSERTED.Assignment_Key VALUES (?,?,?,?,?,?,1)",
+            [transaction_key, "Approver", data["approver_key"], prepared_by_user_key, "Workflow", now],
+        )
+        approver_assignment_key = cur.fetchone()[0]
+
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowEvent] ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                transaction_key, prepared_by_user_key, "Submitter",
+                workflow.EVENT_REQUEST_SUBMITTED, workflow.EVENT_TYPE_LABELS[workflow.EVENT_REQUEST_SUBMITTED],
+                workflow.STATUS_DRAFT, initial_status, now, None, None,
+            ],
+        )
+        cur.execute(
+            "INSERT INTO [etransactions].[WorkflowEvent] ("
+            "  Transaction_Key, Actor_User_Key, Actor_Role,"
+            "  Event_Type, Decision, From_Status, To_Status,"
+            "  Event_DateTime, Comments_Reason, Related_Assignment_Key"
+            ") VALUES (?,?,?,?,?,?,?,?,?,?)",
+            [
+                transaction_key, prepared_by_user_key, "Submitter",
+                workflow.EVENT_APPROVER_ASSIGNED, workflow.EVENT_TYPE_LABELS[workflow.EVENT_APPROVER_ASSIGNED],
+                workflow.STATUS_DRAFT, initial_status, now, None, approver_assignment_key,
+            ],
+        )
+
+        conn.commit()
+    except WorkflowConflictError:
+        raise
     except Exception:
         conn.rollback()
         raise

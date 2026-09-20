@@ -23,9 +23,12 @@ Easy Auth headers always take priority over the local bypass when present.
 
 import base64
 import json
+import logging
 import os
 
 from flask import request, session
+
+logger = logging.getLogger(__name__)
 
 _ROLE_CLAIM_TYPES = {
     "roles",
@@ -68,9 +71,17 @@ def _parse_easy_auth_principal():
             claims = []
         for claim in claims:
             if claim.get("typ") in _ROLE_CLAIM_TYPES:
-                mapped = AZURE_ROLE_TO_APP_ROLE.get(claim.get("val"))
-                if mapped and mapped not in roles:
-                    roles.append(mapped)
+                val = claim.get("val")
+                mapped = AZURE_ROLE_TO_APP_ROLE.get(val)
+                if mapped:
+                    if mapped not in roles:
+                        roles.append(mapped)
+                else:
+                    # Multi-role refactor Part 29: an Entra App Role claim this
+                    # application doesn't recognize is ignored for authorization
+                    # (never trusted), but logged for admin review — never logs
+                    # full token contents, just the one unrecognized value.
+                    logger.warning("Ignoring unrecognized Entra App Role claim value: %r", val)
 
     return {"user_id": principal_id, "display_name": display_name, "roles": roles}
 

@@ -237,9 +237,8 @@
             <div class="card-body small">
                 <div class="alert alert-secondary py-1 px-2 mb-3 small">
                     <i class="fas fa-lock me-1"></i>
-                    Account and routing numbers are masked by default.
-                    Reveal controls are available in this development environment.
-                    {# [RBAC] TODO: Only show reveal option to authorized treasury roles #}
+                    Account and routing numbers are masked by default. Authorized users may
+                    request a temporary Reveal, which is never sent to the browser until requested.
                 </div>
                 <div class="row g-3">
                     <div class="col-sm-6 col-md-4">
@@ -254,10 +253,10 @@
                         <span class="section-label">Account Number</span>
                         <div class="d-flex align-items-center gap-2">
                             <span id="orig-acct-masked" class="masked-value">{{ record.orig_account_number_masked }}</span>
-                            <span id="orig-acct-unmasked" class="unmasked-value">{{ record.orig_account_number }}</span>
+                            <span id="orig-acct-result" class="unmasked-value" style="display:none;"></span>
                             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
                                     id="orig-acct-toggle"
-                                    onclick="toggleMask('orig-acct')">
+                                    onclick="revealBankingField('orig-acct', '{{ url_for('request_reveal_banking', request_id=record.request_id, side='originating') }}', 'account_number')">
                                 <i class="fas fa-eye me-1"></i>Reveal
                             </button>
                         </div>
@@ -266,10 +265,10 @@
                         <span class="section-label">Routing Number</span>
                         <div class="d-flex align-items-center gap-2">
                             <span id="orig-rtn-masked" class="masked-value">{{ record.orig_routing_number_masked }}</span>
-                            <span id="orig-rtn-unmasked" class="unmasked-value">{{ record.orig_routing_number }}</span>
+                            <span id="orig-rtn-result" class="unmasked-value" style="display:none;"></span>
                             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
                                     id="orig-rtn-toggle"
-                                    onclick="toggleMask('orig-rtn')">
+                                    onclick="revealBankingField('orig-rtn', '{{ url_for('request_reveal_banking', request_id=record.request_id, side='originating') }}', 'routing_number')">
                                 <i class="fas fa-eye me-1"></i>Reveal
                             </button>
                         </div>
@@ -313,10 +312,10 @@
                         <span class="section-label">Account Number</span>
                         <div class="d-flex align-items-center gap-2">
                             <span id="recv-acct-masked" class="masked-value">{{ record.recv_account_number_masked }}</span>
-                            <span id="recv-acct-unmasked" class="unmasked-value">{{ record.recv_account_number }}</span>
+                            <span id="recv-acct-result" class="unmasked-value" style="display:none;"></span>
                             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
                                     id="recv-acct-toggle"
-                                    onclick="toggleMask('recv-acct')">
+                                    onclick="revealBankingField('recv-acct', '{{ url_for('request_reveal_banking', request_id=record.request_id, side='receiving') }}', 'account_number')">
                                 <i class="fas fa-eye me-1"></i>Reveal
                             </button>
                         </div>
@@ -325,10 +324,10 @@
                         <span class="section-label">Routing Number</span>
                         <div class="d-flex align-items-center gap-2">
                             <span id="recv-rtn-masked" class="masked-value">{{ record.recv_routing_number_masked }}</span>
-                            <span id="recv-rtn-unmasked" class="unmasked-value">{{ record.recv_routing_number }}</span>
+                            <span id="recv-rtn-result" class="unmasked-value" style="display:none;"></span>
                             <button type="button" class="btn btn-outline-secondary btn-sm py-0 px-1"
                                     id="recv-rtn-toggle"
-                                    onclick="toggleMask('recv-rtn')">
+                                    onclick="revealBankingField('recv-rtn', '{{ url_for('request_reveal_banking', request_id=record.request_id, side='receiving') }}', 'routing_number')">
                                 <i class="fas fa-eye me-1"></i>Reveal
                             </button>
                         </div>
@@ -441,6 +440,46 @@
             </div>
         </div>
 
+        <!-- ── Treasury Processing / Release Evidence (Batch 5) ────── -->
+        {% set treasury_evidence = record.get('treasury_evidence', {}) %}
+        {% if treasury_evidence %}
+        <div class="card shadow-sm mb-4">
+            <div class="detail-section-header">
+                <h6><i class="fas fa-university me-2"></i>Treasury Processing / Release Evidence</h6>
+            </div>
+            <div class="card-body small">
+                <div class="row g-3">
+                    {% for evidence_key, evidence_title in [
+                        ('treasury_initiation_evidence', 'Treasury Initiation Evidence'),
+                        ('treasury_release_evidence',    'Treasury Release Evidence'),
+                        ('bank_release_evidence',        'Final Bank Release Evidence'),
+                    ] %}
+                    {% set ev = treasury_evidence.get(evidence_key) %}
+                    {% if ev %}
+                    <div class="col-12">
+                        <div class="card bg-light border-0 p-2">
+                            <span class="section-label">{{ evidence_title }}</span>
+                            <div class="mt-1">
+                                <i class="fas fa-paperclip text-success me-1"></i>
+                                {% if ev.web_url %}
+                                <a href="{{ ev.web_url }}" target="_blank" rel="noopener" class="text-success fw-semibold">{{ ev.filename }}</a>
+                                {% else %}
+                                <span class="text-success fw-semibold">{{ ev.filename }}</span>
+                                {% endif %}
+                            </div>
+                            <div class="text-muted">
+                                {% if ev.uploaded_by %}Uploaded by {{ ev.uploaded_by }}{% endif %}
+                                {% if ev.date %} on {{ ev.date }}{% endif %}
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
     </div><!-- /col-xl-8 -->
 
     <!-- ═══ RIGHT COLUMN: Actions / Timeline / Comments ══════════ -->
@@ -462,6 +501,7 @@
                     <form method="POST"
                           action="{{ url_for('request_action', request_id=record.request_id) }}"
                           id="action-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
 
                         <!-- Comment field -->
                         <div class="mb-3">
@@ -484,8 +524,8 @@
                                                 workflow.STATUS_TREASURY_RELEASED) %}
                         {# ══ Current workflow vocabulary (SQL-backed transactions) ══ #}
 
-                        {% if ((current_role == 'sam' or current_role == 'treasury') and record.status == workflow.STATUS_PENDING_APPROVER) or
-                              (current_role == 'controller' and record.status == workflow.STATUS_PENDING_CONTROLLER) %}
+                        {% if (current_roles | any_of('sam', 'treasury') and record.status == workflow.STATUS_PENDING_APPROVER) or
+                              (current_roles | any_of('controller') and record.status == workflow.STATUS_PENDING_CONTROLLER) %}
                             <button type="submit" name="action" value="approve"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Approve', '{{ record.request_id }}')">
@@ -500,44 +540,47 @@
                                 <i class="fas fa-ban me-1"></i>Cancel Transaction
                             </button>
 
-                        {% elif (current_role == 'vp' and record.status == workflow.STATUS_PENDING_VP) or
-                                (current_role == 'cfo' and record.status == workflow.STATUS_PENDING_CFO) %}
+                        {% elif (current_roles | any_of('vp') and record.status == workflow.STATUS_PENDING_VP) or
+                                (current_roles | any_of('cfo') and record.status == workflow.STATUS_PENDING_CFO) %}
                             <button type="submit" name="action" value="approve"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Approve', '{{ record.request_id }}')">
                                 <i class="fas fa-check me-1"></i>Approve
                             </button>
 
-                        {% elif current_role == 'treasury' and record.status == workflow.STATUS_READY_FOR_TREASURY %}
+                        {% elif current_roles | any_of('treasury') and record.status == workflow.STATUS_READY_FOR_TREASURY %}
                             {% if record.entity_classification | lower == 'property' %}
-                            <button type="submit" name="action" value="treasury_initiated"
-                                    class="btn btn-info btn-sm text-white"
-                                    onclick="return confirmAction('Treasury Initiated', '{{ record.request_id }}')">
+                            <button type="button" class="btn btn-info btn-sm text-white"
+                                    data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-action="treasury_initiated" data-label="Treasury Initiated"
+                                    data-evidence-label="Treasury Initiation Evidence">
                                 <i class="fas fa-paper-plane me-1"></i>Treasury Initiated
                             </button>
                             {% else %}
-                            <button type="submit" name="action" value="treasury_released"
-                                    class="btn btn-success btn-sm"
-                                    onclick="return confirmAction('Treasury Released', '{{ record.request_id }}')">
+                            <button type="button" class="btn btn-success btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-action="treasury_released" data-label="Treasury Released"
+                                    data-evidence-label="Treasury Release Evidence">
                                 <i class="fas fa-check-double me-1"></i>Treasury Released
                             </button>
                             {% endif %}
 
-                        {% elif current_role == 'treasury' and record.status == workflow.STATUS_TREASURY_RELEASED %}
+                        {% elif current_roles | any_of('treasury') and record.status == workflow.STATUS_TREASURY_RELEASED %}
                             <button type="submit" name="action" value="mark_completed"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Mark as Completed', '{{ record.request_id }}')">
                                 <i class="fas fa-check-double me-1"></i>Mark as Completed
                             </button>
 
-                        {% elif current_role in ('controller', 'vp') and record.status == workflow.STATUS_AWAITING_RELEASE %}
-                            <button type="submit" name="action" value="bank_release"
-                                    class="btn btn-success btn-sm"
-                                    onclick="return confirmAction('Complete Bank Release', '{{ record.request_id }}')">
+                        {% elif current_roles | any_of('controller', 'vp') and record.status == workflow.STATUS_AWAITING_RELEASE %}
+                            <button type="button" class="btn btn-success btn-sm"
+                                    data-bs-toggle="modal" data-bs-target="#evidenceModal"
+                                    data-action="bank_release" data-label="Complete Bank Release"
+                                    data-evidence-label="Final Bank Release Evidence">
                                 <i class="fas fa-university me-1"></i>Complete Bank Release
                             </button>
 
-                        {% elif current_role == 'submitter' and record.status in (workflow.STATUS_PENDING_APPROVER,
+                        {% elif current_roles | any_of('submitter') and record.status in (workflow.STATUS_PENDING_APPROVER,
                               workflow.STATUS_PENDING_CONTROLLER, workflow.STATUS_PENDING_VP,
                               workflow.STATUS_PENDING_CFO, workflow.STATUS_MORE_INFO) %}
                             {% if record.status == workflow.STATUS_MORE_INFO %}
@@ -562,10 +605,10 @@
                         {# ══ Legacy mock/session vocabulary (unchanged) ══ #}
 
                         {# ── Approver-tier actions (same buttons, different status gate) ── #}
-                        {% if (current_role == 'sam' and record.status == 'Pending SAM Approval') or
-                              (current_role == 'controller' and record.status == 'Pending Controller Approval') or
-                              (current_role == 'vp' and record.status == 'Pending VP Approval') or
-                              (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
+                        {% if (current_roles | any_of('sam') and record.status == 'Pending SAM Approval') or
+                              (current_roles | any_of('controller') and record.status == 'Pending Controller Approval') or
+                              (current_roles | any_of('vp') and record.status == 'Pending VP Approval') or
+                              (current_roles | any_of('cfo') and record.status == 'Pending CFO Approval') %}
                             <button type="submit" name="action" value="approve"
                                     class="btn btn-success btn-sm"
                                     onclick="return confirmAction('Approve', '{{ record.request_id }}')">
@@ -576,7 +619,7 @@
                                     data-bs-toggle="modal" data-bs-target="#rfiModal">
                                 <i class="fas fa-question-circle me-1"></i>Request More Information
                             </button>
-                            {% if current_role in ('sam', 'controller') %}
+                            {% if current_roles | any_of('sam', 'controller') %}
                             <button type="button" class="btn btn-outline-danger btn-sm"
                                     data-bs-toggle="modal" data-bs-target="#cancelModal">
                                 <i class="fas fa-ban me-1"></i>Cancel Transaction
@@ -584,7 +627,7 @@
                             {% endif %}
 
                         {# ── Treasury actions ── #}
-                        {% elif current_role == 'treasury' %}
+                        {% elif current_roles | any_of('treasury') %}
                             {% if record.status == 'Pending Treasury Review' %}
                             <button type="submit" name="action" value="treasury_reviewed"
                                     class="btn btn-info btn-sm text-white"
@@ -610,7 +653,7 @@
                             {% endif %}
 
                         {# ── Submitter actions ── #}
-                        {% elif current_role == 'submitter' %}
+                        {% elif current_roles | any_of('submitter') %}
                             {% if record.status == 'Needs More Information' %}
                             <button type="submit" name="action" value="requester_respond"
                                     class="btn btn-primary btn-sm"
@@ -657,6 +700,7 @@
                     <form method="POST"
                           action="{{ url_for('request_reassign', request_id=record.request_id) }}"
                           id="reassign-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-3">
                             <label class="form-label small fw-semibold">Current {{ record.reassignment_workflow_role }}</label>
                             <input type="text" class="form-control form-control-sm" disabled
@@ -748,6 +792,7 @@
                 {% if record.can_add_comment %}
                 <div class="card-footer bg-white">
                     <form method="POST" action="{{ url_for('request_comment', request_id=record.request_id) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-2">
                             <textarea class="form-control form-control-sm" name="comment_text" rows="2"
                                       placeholder="Add a comment..." required></textarea>
@@ -800,6 +845,7 @@
                     <form method="POST"
                           action="{{ url_for('request_attach', request_id=record.request_id) }}"
                           enctype="multipart/form-data">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                         <div class="mb-2">
                             <label class="form-label small fw-semibold mb-1" for="extra-files">Attach Files</label>
                             <input type="file" class="form-control form-control-sm" id="extra-files"
@@ -839,17 +885,18 @@
 
 </div><!-- /row -->
 
-{% if (current_role == 'sam' and record.status in ('Pending SAM Approval', workflow.STATUS_PENDING_APPROVER)) or
-      (current_role == 'treasury' and record.status == workflow.STATUS_PENDING_APPROVER) or
-      (current_role == 'controller' and record.status in ('Pending Controller Approval', workflow.STATUS_PENDING_CONTROLLER)) or
-      (current_role == 'vp' and record.status == 'Pending VP Approval') or
-      (current_role == 'cfo' and record.status == 'Pending CFO Approval') %}
+{% if (current_roles | any_of('sam') and record.status in ('Pending SAM Approval', workflow.STATUS_PENDING_APPROVER)) or
+      (current_roles | any_of('treasury') and record.status == workflow.STATUS_PENDING_APPROVER) or
+      (current_roles | any_of('controller') and record.status in ('Pending Controller Approval', workflow.STATUS_PENDING_CONTROLLER)) or
+      (current_roles | any_of('vp') and record.status == 'Pending VP Approval') or
+      (current_roles | any_of('cfo') and record.status == 'Pending CFO Approval') %}
 <!-- ── Request More Information Modal ──────────────── -->
 <div class="modal fade" id="rfiModal" tabindex="-1" aria-labelledby="rfiModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             <form id="rfi-form" method="POST"
                   action="{{ url_for('request_action', request_id=record.request_id) }}" novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="more_info">
                 <div class="modal-header bg-warning">
                     <h5 class="modal-title fw-bold text-dark" id="rfiModalLabel">
@@ -894,13 +941,14 @@
 </div>
 {% endif %}
 
-{% if current_role in ('submitter', 'sam', 'controller', 'treasury') %}
+{% if current_roles | any_of('submitter', 'sam', 'controller', 'treasury') %}
 <!-- ── Cancel Transaction Modal ─────────────────────── -->
 <div class="modal fade" id="cancelModal" tabindex="-1" aria-labelledby="cancelModalLabel" aria-hidden="true">
     <div class="modal-dialog">
         <div class="modal-content">
             <form id="cancel-form" method="POST"
                   action="{{ url_for('request_action', request_id=record.request_id) }}" novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="action" value="cancel">
                 <div class="modal-header bg-danger">
                     <h5 class="modal-title fw-bold text-white" id="cancelModalLabel">
@@ -941,6 +989,61 @@
                     </button>
                     <button type="submit" class="btn btn-danger btn-sm" id="cancel-submit-btn">
                         <i class="fas fa-ban me-1"></i>Confirm Cancellation
+                    </button>
+                </div>
+            </form>
+        </div>
+    </div>
+</div>
+{% endif %}
+
+{% if current_roles | any_of('treasury', 'controller', 'vp') %}
+<!-- ── Treasury/Release Evidence Modal (Batch 5) ────── -->
+<!-- Shared by Treasury Initiated, Treasury Released, and Complete Bank Release —
+     only one is ever applicable for a given transaction's role/status combination.
+     Evidence is REQUIRED server-side regardless of this form's `required` attribute. -->
+<div class="modal fade" id="evidenceModal" tabindex="-1" aria-labelledby="evidenceModalLabel" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <form id="evidence-form" method="POST"
+                  action="{{ url_for('request_action', request_id=record.request_id) }}"
+                  enctype="multipart/form-data" novalidate>
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" id="evidence-action-input" value="">
+                <div class="modal-header bg-info">
+                    <h5 class="modal-title fw-bold text-white" id="evidenceModalLabel">
+                        <i class="fas fa-file-upload me-2"></i><span id="evidence-modal-title">Confirm Action</span>
+                    </h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div class="row g-3 mb-3 small">
+                        <div class="col-sm-6">
+                            <span class="section-label">Transaction</span>
+                            <div class="fw-semibold">{{ record.request_id }}</div>
+                        </div>
+                    </div>
+                    <label class="form-label fw-semibold" for="evidence-comment">Comment (optional)</label>
+                    <textarea class="form-control mb-3" id="evidence-comment" name="comment" rows="2"
+                              placeholder="Add a note for the record..."></textarea>
+                    <label class="form-label fw-semibold" for="evidence-file">
+                        <span id="evidence-file-label">Evidence</span> <span class="text-danger">*</span>
+                    </label>
+                    <input type="file" class="form-control" id="evidence-file" name="evidence_file"
+                           aria-describedby="evidence-file-help evidence-file-error" required>
+                    <div id="evidence-file-help" class="form-text">
+                        A screenshot or confirmation document is required to complete this action.
+                    </div>
+                    <div id="evidence-file-error" class="text-danger small mt-1" style="display:none;">
+                        Please attach the required evidence file.
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal" id="evidence-cancel-btn">
+                        Cancel
+                    </button>
+                    <button type="submit" class="btn btn-info text-white btn-sm" id="evidence-submit-btn">
+                        <i class="fas fa-paper-plane me-1"></i>Submit
                     </button>
                 </div>
             </form>
@@ -1042,6 +1145,60 @@ document.addEventListener('DOMContentLoaded', function () {
         cancelReason.classList.remove('is-invalid');
         cancelError.style.display = 'none';
         setCancelSubmitting(true);
+    });
+});
+
+// ── Treasury/Release Evidence Modal (Batch 5) ─────────────────────
+document.addEventListener('DOMContentLoaded', function () {
+    const evidenceModalEl = document.getElementById('evidenceModal');
+    if (!evidenceModalEl) return;
+
+    const evidenceForm      = document.getElementById('evidence-form');
+    const evidenceActionEl  = document.getElementById('evidence-action-input');
+    const evidenceTitleEl   = document.getElementById('evidence-modal-title');
+    const evidenceFileLabel = document.getElementById('evidence-file-label');
+    const evidenceFile      = document.getElementById('evidence-file');
+    const evidenceError     = document.getElementById('evidence-file-error');
+    const evidenceSubmitBtn = document.getElementById('evidence-submit-btn');
+    const evidenceCancelBtn = document.getElementById('evidence-cancel-btn');
+
+    function setEvidenceSubmitting(isSubmitting) {
+        evidenceSubmitBtn.disabled = isSubmitting;
+        evidenceCancelBtn.disabled = isSubmitting;
+        evidenceSubmitBtn.innerHTML = isSubmitting
+            ? '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Submitting...'
+            : '<i class="fas fa-paper-plane me-1"></i>Submit';
+    }
+
+    // The same modal is reused by every trigger button — read the button's
+    // data-* attributes (set per action in the template) to configure it.
+    evidenceModalEl.addEventListener('show.bs.modal', function (event) {
+        const trigger = event.relatedTarget;
+        if (!trigger) return;
+        evidenceActionEl.value = trigger.dataset.action || '';
+        evidenceTitleEl.textContent = trigger.dataset.label || 'Confirm Action';
+        evidenceFileLabel.textContent = trigger.dataset.evidenceLabel || 'Evidence';
+    });
+
+    evidenceModalEl.addEventListener('hidden.bs.modal', function () {
+        evidenceForm.reset();
+        evidenceFile.classList.remove('is-invalid');
+        evidenceError.style.display = 'none';
+        setEvidenceSubmitting(false);
+    });
+
+    evidenceForm.addEventListener('submit', function (e) {
+        // Client-side convenience only — the server independently rejects a
+        // missing/failed evidence upload and never advances the workflow.
+        if (!evidenceFile.files || evidenceFile.files.length === 0) {
+            e.preventDefault();
+            evidenceFile.classList.add('is-invalid');
+            evidenceError.style.display = 'block';
+            return;
+        }
+        evidenceFile.classList.remove('is-invalid');
+        evidenceError.style.display = 'none';
+        setEvidenceSubmitting(true);
     });
 });
 </script>
