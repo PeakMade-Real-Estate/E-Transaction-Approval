@@ -657,11 +657,13 @@ def any_of(roles, *codes):
 def inject_globals():
     identity = auth.current_identity()
     roles = current_roles()
+    app_user = current_app_user()
     return {
         "is_prototype": False,
         "current_year": datetime.now().year,
         "current_roles": sorted(roles),
         "current_roles_display": current_roles_display(),
+        "current_user_display_name": app_user["display_name"] if app_user else identity["display_name"],
         "auth_source":  identity["source"],
         "can_switch_role": identity["source"] == "dev",
         "can_view_bank_accounts": can_view_bank_accounts(),
@@ -670,7 +672,7 @@ def inject_globals():
 
 
 # [AUTH] Development role gate — replace with Azure AD / MSAL authentication
-ROLE_FREE_ENDPOINTS = {"role_select", "switch_role", "dev_set_acting_as_user", "static"}
+ROLE_FREE_ENDPOINTS = {"role_select", "switch_role", "dev_set_acting_as_user", "logout", "static"}
 
 @app.before_request
 def require_role():
@@ -707,6 +709,21 @@ def require_role():
     if not current_roles():
         return redirect(url_for("role_select"))
     return None
+
+
+@app.route("/logout")
+def logout():
+    """
+    Production (Easy Auth): defers to Azure App Service's built-in logout
+    endpoint, which clears the Easy Auth session cookie server-side — this app
+    has no session of its own to clear in that case. Local dev: clears the
+    role-switcher/Acting-As session state and returns to the picker.
+    """
+    is_easy_auth = auth.current_identity()["source"] == "easy_auth"
+    session.clear()
+    if is_easy_auth:
+        return redirect("/.auth/logout?post_logout_redirect_uri=/")
+    return redirect(url_for("role_select"))
 
 
 # ─────────────────────────────────────────────────────────────

@@ -57,11 +57,14 @@
                 {% endif %}
                 <!-- [AUTH] Identity source: Easy Auth in Azure, local dev role switcher otherwise -->
                 <li class="nav-item ms-3 pe-1">
-                    <span class="nav-link py-0 d-flex align-items-center gap-2">
+                    <span class="nav-link py-0 d-flex align-items-center gap-2"
+                          title="{% if auth_source == 'easy_auth' %}Signed in{% else %}Testing as (local dev){% endif %}">
                         <i class="fas fa-{% if current_roles | length > 1 %}user-shield{% elif current_roles == ['submitter'] %}file-pen{% elif current_roles == ['sam'] %}user-check{% elif current_roles == ['controller'] %}calculator{% elif current_roles == ['vp'] %}user-tie{% elif current_roles == ['cfo'] %}crown{% elif current_roles == ['treasury'] %}vault{% elif current_roles == ['business_admin'] %}user-shield{% elif current_roles == ['it_admin'] %}laptop-code{% elif current_roles == ['treasury_bank_admin'] %}building-columns{% else %}user-circle{% endif %} fs-4 text-light opacity-75"></i>
                         <div class="lh-1">
-                            <div class="text-white-50" style="font-size:0.7rem;">{% if auth_source == 'easy_auth' %}Signed in as{% else %}Testing as{% endif %}</div>
                             <div class="text-white fw-semibold" style="font-size:0.8rem;">
+                                {{ current_user_display_name }}
+                            </div>
+                            <div class="text-white-50" style="font-size:0.7rem;">
                                 {{ current_roles_display }}
                             </div>
                         </div>
@@ -74,6 +77,11 @@
                     </a>
                 </li>
                 {% endif %}
+                <li class="nav-item">
+                    <a class="nav-link text-white-50 px-2" href="{{ url_for('logout') }}" title="Log out" style="font-size:0.75rem;">
+                        <i class="fas fa-right-from-bracket me-1"></i>Logout
+                    </a>
+                </li>
             </ul>
         </div>
     </div>
