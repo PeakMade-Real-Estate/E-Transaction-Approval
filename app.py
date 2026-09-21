@@ -389,7 +389,7 @@ def _validate_bank_account_form(data, *, is_new):
     return errors
 
 
-def _validate_intake_submission(frm, *, files_present: dict, bank_account_status, has_stored_receiving_bank_instruction=False):
+def _validate_intake_submission(frm, *, files_present: dict, bank_account_status, has_stored_receiving_bank_instruction=False, prepared_by_user_key=None):
     """
     Authoritative SERVER-SIDE validation for /intake/submit — mirrors the
     client-side checks already in intake.html so a direct POST (bypassing
@@ -400,6 +400,10 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     BankAccount.Status value already looked up by the caller (None if the
     supplied key doesn't exist), and `files_present` is a dict of the three
     named required attachment fields to booleans (was a real file selected).
+    `prepared_by_user_key`, if supplied, rejects selecting the requester as
+    their own Approver/Controller (segregation of duties) — the intake
+    dropdowns already exclude the current user, this is the server-side
+    backstop against a crafted direct POST.
 
     Returns a list of user-facing error strings; empty means the submission
     may proceed.
@@ -422,6 +426,15 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     require("controller_key", "Controller")
     require("payment_purpose", "Payment Purpose / Description")
     require("currency", "Currency")
+
+    if prepared_by_user_key is not None:
+        for field, label in (("approver_key", "Approver"), ("controller_key", "Controller")):
+            raw = (frm.get(field) or "").strip()
+            try:
+                if raw and int(raw) == prepared_by_user_key:
+                    errors.append(f"You cannot select yourself as the {label} for your own request.")
+            except ValueError:
+                pass  # non-numeric value is already rejected elsewhere (invalid FK lookup)
 
     amount_raw = (frm.get("amount") or "").replace(",", "").strip()
     try:
@@ -828,26 +841,34 @@ def _handle_save_draft(frm, prepared_by_user):
         except ValueError:
             errors.append("Originating Bank Account is invalid.")
 
-    for field, label in (("approver_key", "Approver"), ("controller_key", "Controller")):
+    for field, label, role_code in (("approver_key", "Approver", "sam"), ("controller_key", "Controller", "controller")):
         raw = frm.get(field, "").strip()
         if raw and not errors:
             try:
                 if db.get_app_user_by_key(int(raw)) is None:
                     errors.append(f"The selected {label} could not be found.")
+                elif int(raw) == prepared_by_user["user_key"]:
+                    errors.append(f"You cannot select yourself as the {label} for your own request.")
+                elif role_code not in db.get_app_user_role_codes(int(raw)):
+                    errors.append(f"The selected {label} is not an eligible {label}.")
             except ValueError:
                 errors.append(f"{label} is invalid.")
 
     users, bank_accounts = [], []
+    approver_users, controller_users = [], []
     try:
-        users         = db.get_user_list()
-        bank_accounts = db.get_bank_accounts()
+        users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+        approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+        controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+        bank_accounts     = db.get_bank_accounts()
     except Exception:
         pass
 
     if errors:
         for err in errors:
             flash(err, "warning")
-        return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+        return render_template("intake.html", users=users, approver_users=approver_users,
+                                controller_users=controller_users, bank_accounts=bank_accounts,
                                 prepared_by_user=prepared_by_user, errors=errors)
 
     draft_data = {
@@ -891,10 +912,40 @@ def _handle_save_draft(frm, prepared_by_user):
     except Exception:
         app.logger.exception("Draft save failed")
         flash("Unable to save this draft. Please try again.", "danger")
-        return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+        return render_template("intake.html", users=users, approver_users=approver_users,
+                                controller_users=controller_users, bank_accounts=bank_accounts,
                                 prepared_by_user=prepared_by_user, errors=[])
 
     return redirect(url_for("intake_draft_edit", transaction_key=transaction_key))
+
+
+def _get_user_list_excluding_self(exclude_user_key=None):
+    """
+    Prepared-By fallback candidate list (used only when the signed-in identity
+    can't be resolved to an AppUser). Excludes `exclude_user_key` for
+    consistency, though that param is always None on this path in practice.
+    """
+    users = db.get_user_list()
+    if exclude_user_key is None:
+        return users
+    return [u for u in users if u["user_key"] != exclude_user_key]
+
+
+def _role_candidates_excluding_self(role_code, exclude_user_key=None):
+    """
+    Approver ('sam') / Controller ('controller') candidate list for the intake
+    form — restricted to AppUsers actually holding that AppUserRole (a user
+    must not see themselves, or anyone lacking the role, as a selectable
+    Approver/Controller). Excludes `exclude_user_key` (the preparer) so nobody
+    can select themselves — segregation of duties.
+    """
+    try:
+        candidates = db.get_reassignment_candidates(role_code)
+    except Exception:
+        candidates = []
+    if exclude_user_key is None:
+        return candidates
+    return [u for u in candidates if u["user_key"] != exclude_user_key]
 
 
 @app.route("/intake")
@@ -905,19 +956,23 @@ def intake():
         return redirect(url_for("dashboard"))
     _db_on = database_enabled()
     users             = []
+    approver_users    = []
+    controller_users  = []
     bank_accounts     = []
     prepared_by_user  = None
     identity_unmapped = False
     if _db_on:
-        try:
-            users         = db.get_user_list()
-            bank_accounts = db.get_bank_accounts()
-        except Exception:
-            pass
         # Prepared By is always the authenticated user, never a form selection
         # (Batch 7 Part 1/2) — resolved here only for read-only display.
         prepared_by_user = current_app_user()
         identity_unmapped = prepared_by_user is None
+        try:
+            users             = _get_user_list_excluding_self(prepared_by_user["user_key"] if prepared_by_user else None)
+            approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"] if prepared_by_user else None)
+            controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"] if prepared_by_user else None)
+            bank_accounts     = db.get_bank_accounts()
+        except Exception:
+            pass
         if identity_unmapped:
             flash(
                 "Your signed-in account could not be matched to an active AppUser record, "
@@ -925,7 +980,8 @@ def intake():
                 "danger",
             )
     return render_template(
-        "intake.html", users=users, bank_accounts=bank_accounts,
+        "intake.html", users=users, approver_users=approver_users, controller_users=controller_users,
+        bank_accounts=bank_accounts,
         prepared_by_user=prepared_by_user, identity_unmapped=identity_unmapped, draft=None,
     )
 
@@ -957,9 +1013,12 @@ def intake_draft_edit(transaction_key):
         flash("Draft not found, not yours, or no longer editable.", "warning")
         return redirect(url_for("dashboard"))
     users, bank_accounts = [], []
+    approver_users, controller_users = [], []
     try:
-        users         = db.get_user_list()
-        bank_accounts = db.get_bank_accounts()
+        users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+        approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+        controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+        bank_accounts     = db.get_bank_accounts()
     except Exception:
         pass
     # Show which required attachments are already on file for this Draft
@@ -975,7 +1034,8 @@ def intake_draft_edit(transaction_key):
         except Exception:
             app.logger.exception("Unable to load existing draft attachments for %s", draft["request_id"])
     return render_template(
-        "intake.html", users=users, bank_accounts=bank_accounts,
+        "intake.html", users=users, approver_users=approver_users, controller_users=controller_users,
+        bank_accounts=bank_accounts,
         prepared_by_user=prepared_by_user, identity_unmapped=False, draft=draft,
         existing_attachments=existing_attachments,
     )
@@ -1011,12 +1071,16 @@ def intake_submit():
             "danger",
         )
         users, bank_accounts = [], []
+        approver_users, controller_users = [], []
         try:
-            users         = db.get_user_list()
-            bank_accounts = db.get_bank_accounts()
+            users             = db.get_user_list()
+            approver_users    = _role_candidates_excluding_self("sam")
+            controller_users  = _role_candidates_excluding_self("controller")
+            bank_accounts     = db.get_bank_accounts()
         except Exception:
             pass
-        return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+        return render_template("intake.html", users=users, approver_users=approver_users,
+                                controller_users=controller_users, bank_accounts=bank_accounts,
                                 prepared_by_user=None, identity_unmapped=True, errors=[])
 
     # Batch 8: Save Draft is a distinct operation from Submit Request — handled
@@ -1142,7 +1206,20 @@ def intake_submit():
         errors = _validate_intake_submission(
             frm, files_present=files_present, bank_account_status=bank_account_status,
             has_stored_receiving_bank_instruction=bool(draft_transaction_key_raw),
+            prepared_by_user_key=prepared_by_user["user_key"],
         )
+
+        # Defense in depth: the intake.html dropdowns are already role-filtered
+        # (Approver='sam', Controller='controller'), but a crafted direct POST
+        # could still submit any user_key — re-verify server-side.
+        if not errors:
+            for field, label, role_code in (("approver_key", "Approver", "sam"), ("controller_key", "Controller", "controller")):
+                raw = (frm.get(field) or "").strip()
+                try:
+                    if raw and role_code not in db.get_app_user_role_codes(int(raw)):
+                        errors.append(f"The selected {label} is not an eligible {label}.")
+                except ValueError:
+                    pass  # non-numeric value already rejected by _validate_intake_submission
 
         # Part 2 — validate the "Previously Used" claim against completed history.
         # Only meaningful once the basic receiving-bank fields themselves are valid.
@@ -1180,12 +1257,16 @@ def intake_submit():
             for err in errors:
                 flash(err, "warning")
             users, bank_accounts = [], []
+            approver_users, controller_users = [], []
             try:
-                users         = db.get_user_list()
-                bank_accounts = db.get_bank_accounts()
+                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+                bank_accounts     = db.get_bank_accounts()
             except Exception:
                 pass
-            return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+            return render_template("intake.html", users=users, approver_users=approver_users,
+                                    controller_users=controller_users, bank_accounts=bank_accounts,
                                     prepared_by_user=prepared_by_user, errors=errors)
 
         # Resolve the ApprovalRule BEFORE reserving a Request_ID / uploading
@@ -1197,12 +1278,16 @@ def intake_submit():
             app.logger.error("ApprovalRule resolution failed: %s", exc)
             flash(f"Unable to route this request: {exc}", "danger")
             users, bank_accounts = [], []
+            approver_users, controller_users = [], []
             try:
-                users         = db.get_user_list()
-                bank_accounts = db.get_bank_accounts()
+                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+                bank_accounts     = db.get_bank_accounts()
             except Exception:
                 pass
-            return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+            return render_template("intake.html", users=users, approver_users=approver_users,
+                                    controller_users=controller_users, bank_accounts=bank_accounts,
                                     prepared_by_user=prepared_by_user, errors=[])
 
         if draft_transaction_key_raw:
@@ -1264,12 +1349,16 @@ def intake_submit():
                 app.logger.exception("Draft finalization failed for transaction_key=%s", draft_transaction_key_raw)
                 flash("Unable to submit this request. Please try again.", "danger")
                 users, bank_accounts = [], []
+                approver_users, controller_users = [], []
                 try:
-                    users         = db.get_user_list()
-                    bank_accounts = db.get_bank_accounts()
+                    users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+                    approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+                    controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+                    bank_accounts     = db.get_bank_accounts()
                 except Exception:
                     pass
-                return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+                return render_template("intake.html", users=users, approver_users=approver_users,
+                                        controller_users=controller_users, bank_accounts=bank_accounts,
                                         prepared_by_user=prepared_by_user, errors=[])
 
         try:
@@ -1331,12 +1420,16 @@ def intake_submit():
             app.logger.error("ApprovalRule resolution failed: %s", exc)
             flash(f"Unable to route this request: {exc}", "danger")
             users, bank_accounts = [], []
+            approver_users, controller_users = [], []
             try:
-                users         = db.get_user_list()
-                bank_accounts = db.get_bank_accounts()
+                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+                bank_accounts     = db.get_bank_accounts()
             except Exception:
                 pass
-            return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+            return render_template("intake.html", users=users, approver_users=approver_users,
+                                    controller_users=controller_users, bank_accounts=bank_accounts,
                                     prepared_by_user=prepared_by_user, errors=[])
         except Exception:
             # Never echo the raw exception to the user — it can contain SQL error
@@ -1344,12 +1437,16 @@ def intake_submit():
             app.logger.exception("Intake submission failed")
             flash("Unable to submit this request. Please try again.", "danger")
             users, bank_accounts = [], []
+            approver_users, controller_users = [], []
             try:
-                users         = db.get_user_list()
-                bank_accounts = db.get_bank_accounts()
+                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+                bank_accounts     = db.get_bank_accounts()
             except Exception:
                 pass
-            return render_template("intake.html", users=users, bank_accounts=bank_accounts,
+            return render_template("intake.html", users=users, approver_users=approver_users,
+                                    controller_users=controller_users, bank_accounts=bank_accounts,
                                     prepared_by_user=prepared_by_user, errors=[])
 
     # Batch 10 Part 3/4: this session-only fallback path is only ever reached
@@ -1360,7 +1457,8 @@ def intake_submit():
     if not dev_fallback_allowed():
         app.logger.error("Intake submission rejected: SQL data source is unavailable (DB_ENABLED=false) and dev fallback is disabled")
         flash("This application's data source is currently unavailable. Please contact an administrator before submitting.", "danger")
-        return render_template("intake.html", users=[], bank_accounts=[],
+        return render_template("intake.html", users=[], approver_users=[], controller_users=[],
+                                bank_accounts=[],
                                 prepared_by_user=None, identity_unmapped=False, errors=[])
 
     submitted = session.get("submitted_requests", [])

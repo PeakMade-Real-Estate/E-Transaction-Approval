@@ -139,6 +139,7 @@ class IntakeSubmitPreparedByTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user",
                            return_value={"user_key": 11, "display_name": "Real User", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match",
                            return_value={"transaction_key": 1, "request_id": "TXN-X", "last_used_date": "2026-01-01"}), \
              patch.object(app_module.db, "resolve_approval_rule",
@@ -159,6 +160,7 @@ class IntakeSubmitPreparedByTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user",
                            return_value={"user_key": 11, "display_name": "Real User", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match",
                            return_value={"transaction_key": 1, "request_id": "TXN-X", "last_used_date": "2026-01-01"}), \
              patch.object(app_module.db, "resolve_approval_rule",

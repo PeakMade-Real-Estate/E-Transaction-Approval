@@ -385,6 +385,7 @@ class SaveDraftRouteTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
              patch.object(app_module.db, "get_app_user_by_key", return_value={"user_key": 2, "display_name": "A", "email": ""}), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
@@ -397,6 +398,7 @@ class SaveDraftRouteTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
              patch.object(app_module.db, "get_app_user_by_key", return_value={"user_key": 2, "display_name": "A", "email": ""}), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
@@ -469,6 +471,7 @@ class FinalizeDraftRouteTests(unittest.TestCase):
     def test_28_29_30_complete_draft_passes_validation_and_reuses_same_ids(self):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match", return_value=None), \
              patch.object(app_module.db, "resolve_approval_rule",
                            return_value={"approval_rule_key": 7, "requires_approver": True,
@@ -488,6 +491,7 @@ class FinalizeDraftRouteTests(unittest.TestCase):
     def test_conflict_on_finalize_redirects_to_dashboard(self):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match", return_value=None), \
              patch.object(app_module.db, "resolve_approval_rule",
                            return_value={"approval_rule_key": 7, "requires_approver": True,
@@ -532,6 +536,7 @@ class BrandNewSubmissionRegressionTests(unittest.TestCase):
         }
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match", return_value=None), \
              patch.object(app_module.db, "resolve_approval_rule",
                            return_value={"approval_rule_key": 7, "requires_approver": True,
@@ -700,6 +705,7 @@ class DraftBankAccountKeyPersistenceRouteTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
              patch.object(app_module.db, "get_app_user_by_key", return_value={"user_key": 2, "display_name": "A", "email": ""}), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
@@ -716,6 +722,7 @@ class DraftBankAccountKeyPersistenceRouteTests(unittest.TestCase):
         with patch.object(app_module, "current_app_user", return_value={"user_key": 11, "display_name": "U", "email": ""}), \
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
              patch.object(app_module.db, "get_app_user_by_key", return_value={"user_key": 2, "display_name": "A", "email": ""}), \
+             patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \

@@ -820,11 +820,13 @@ def get_app_user_role_codes(user_key):
     """
     Return the distinct, currently-effective Role_Code values `user_key` holds
     in AppUserRole (Is_Active=1, within any Effective_Start/End_Date window).
-    Used ONLY by the local dev "Acting As" simulation (app.current_roles()) to
+    Used by the local dev "Acting As" simulation (app.current_roles()) to
     approximate the full Entra App Role set a real user would have in
-    production — production itself never reads AppUserRole for role grants
-    (Entra is the sole functional-role authority; see
-    e_transaction_multi_role_authorization_refactor.md Part 3/8).
+    production (Entra is the sole functional-role authority for production
+    role grants; see e_transaction_multi_role_authorization_refactor.md Part
+    3/8), and also by the intake form's server-side Approver/Controller
+    eligibility check (a selected Approver/Controller must actually hold the
+    'sam'/'controller' AppUserRole).
     """
     if not user_key:
         return []

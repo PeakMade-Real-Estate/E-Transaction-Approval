@@ -205,10 +205,10 @@
                                 <label class="form-label fw-semibold" for="approver">
                                     Approver <span class="text-danger">*</span>
                                 </label>
-                                {% if users %}
+                                {% if approver_users %}
                                 <select class="form-select" id="approver" name="approver_key" required>
                                     <option value="">&#8212; Select Approver &#8212;</option>
-                                    {% for u in users %}
+                                    {% for u in approver_users %}
                                     <option value="{{ u.user_key }}" {% if draft and draft.approver_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
@@ -223,10 +223,10 @@
                                 <label class="form-label fw-semibold" for="controller">
                                     Controller <span class="text-danger">*</span>
                                 </label>
-                                {% if users %}
+                                {% if controller_users %}
                                 <select class="form-select" id="controller" name="controller_key" required>
                                     <option value="">&#8212; Select Controller &#8212;</option>
-                                    {% for u in users %}
+                                    {% for u in controller_users %}
                                     <option value="{{ u.user_key }}" {% if draft and draft.controller_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
