@@ -183,20 +183,58 @@
                                 <div class="form-text">Automatically set to today's date.</div>
                             </div>
 
-                            <!-- Property / Department -->
-                            <div class="col-md-8">
-                                <label class="form-label fw-semibold" for="property_dept">
-                                    Property / Department <span class="text-danger">*</span>
+                            <!-- Property / Corporate classification toggle -->
+                            <div class="col-12">
+                                <label class="form-label fw-semibold d-block">
+                                    Property or Corporate <span class="text-danger">*</span>
                                 </label>
-                                <input type="text" class="form-control" id="property_dept"
-                                       name="property_dept" value="{{ draft.property_dept if draft else request.form.get('property_dept', '') }}"
-                                       placeholder="e.g. Sunset Ridge Apartments" required>
+                                <div class="btn-group" role="group" aria-label="Property or Corporate">
+                                    <input type="radio" class="btn-check" name="classification" id="classification_property"
+                                           value="property" autocomplete="off"
+                                           {% if draft and draft.classification == 'property' %}checked{% endif %}>
+                                    <label class="btn btn-outline-primary btn-sm" for="classification_property">Property</label>
+
+                                    <input type="radio" class="btn-check" name="classification" id="classification_corporate"
+                                           value="corporate" autocomplete="off"
+                                           {% if draft and draft.classification == 'corporate' %}checked{% endif %}>
+                                    <label class="btn btn-outline-primary btn-sm" for="classification_corporate">Corporate</label>
+                                </div>
                             </div>
 
-                            <!-- Entity ID -->
-                            <div class="col-md-4">
+                            <!-- Property dropdown (shown when Property is selected) -->
+                            <div class="col-md-8" id="property-select-wrapper" style="display:none;">
+                                <label class="form-label fw-semibold" for="property_entity_number">
+                                    Property <span class="text-danger">*</span>
+                                </label>
+                                <select class="form-select" id="property_entity_number" name="property_entity_number">
+                                    <option value="">&#8212; Select Property &#8212;</option>
+                                    {% for p in properties %}
+                                    <option value="{{ p.entity_number }}"
+                                        {% if draft and draft.property_entity_number == p.entity_number %}selected{% endif %}>
+                                        {{ p.name }}
+                                    </option>
+                                    {% endfor %}
+                                </select>
+                                {% if not properties %}
+                                <div class="form-text text-warning">
+                                    No properties are available right now — SharePoint may be unreachable.
+                                </div>
+                                {% endif %}
+                            </div>
+
+                            <!-- Corporate free-form department (shown when Corporate is selected) -->
+                            <div class="col-md-8" id="corporate-dept-wrapper" style="display:none;">
+                                <label class="form-label fw-semibold" for="property_dept">
+                                    Department <span class="text-danger">*</span>
+                                </label>
+                                <input type="text" class="form-control" id="property_dept"
+                                       name="property_dept" value="{{ draft.property_dept if draft and draft.classification == 'corporate' else request.form.get('property_dept', '') }}"
+                                       placeholder="e.g. Treasury / Corporate Finance">
+                            </div>
+                            <div class="col-md-4" id="corporate-entityid-wrapper" style="display:none;">
                                 <label class="form-label fw-semibold" for="entity_id">Entity ID</label>
-                                <input type="text" class="form-control" id="entity_id" value="{{ draft.property_code if draft else request.form.get('entity_id', '') }}"
+                                <input type="text" class="form-control" id="entity_id"
+                                       value="{{ draft.property_code if draft and draft.classification == 'corporate' else request.form.get('entity_id', '') }}"
                                        name="entity_id" placeholder="e.g. SRA-001">
                             </div>
 
@@ -837,6 +875,29 @@
     document.getElementById('prepared_date').value = new Date().toLocaleDateString('en-CA');
     {% endif %}
 
+    // ── Property/Corporate → show/hide the matching field(s) ────
+    function onClassificationChange() {
+        const propertyChecked  = document.getElementById('classification_property')?.checked;
+        const corporateChecked = document.getElementById('classification_corporate')?.checked;
+
+        const propertyWrapper   = document.getElementById('property-select-wrapper');
+        const deptWrapper       = document.getElementById('corporate-dept-wrapper');
+        const entityIdWrapper   = document.getElementById('corporate-entityid-wrapper');
+        const propertySelect    = document.getElementById('property_entity_number');
+        const deptField         = document.getElementById('property_dept');
+
+        if (propertyWrapper) propertyWrapper.style.display = propertyChecked ? 'block' : 'none';
+        if (deptWrapper)     deptWrapper.style.display     = corporateChecked ? 'block' : 'none';
+        if (entityIdWrapper) entityIdWrapper.style.display = corporateChecked ? 'block' : 'none';
+
+        if (propertySelect) propertySelect.required = !!propertyChecked;
+        if (deptField)      deptField.required      = !!corporateChecked;
+        if (propertyChecked && deptField) deptField.value = '';
+        if (corporateChecked && propertySelect) propertySelect.value = '';
+    }
+    document.querySelectorAll('input[name="classification"]').forEach(el => el.addEventListener('change', onClassificationChange));
+    onClassificationChange();  // reflect a resumed Draft's stored classification on load
+
     // ── Urgent → show/hide Urgency Reason ───────────────────────
     function onUrgentChange() {
         const yes = document.getElementById('urgent_yes');
@@ -890,6 +951,17 @@
     function validateAttachments(e) {
         const reqType = document.getElementById('request_type')?.value || '';
         const errors  = [];
+
+        // Property/Corporate must be chosen, with the matching field filled in
+        const propertyChecked  = document.getElementById('classification_property')?.checked;
+        const corporateChecked = document.getElementById('classification_corporate')?.checked;
+        if (!propertyChecked && !corporateChecked) {
+            errors.push({ msg: 'Select whether this request is for a <strong>Property</strong> or <strong>Corporate</strong>.', section: 'sectionA' });
+        } else if (propertyChecked && !document.getElementById('property_entity_number')?.value) {
+            errors.push({ msg: '<strong>Property</strong> must be selected.', section: 'sectionA' });
+        } else if (corporateChecked && !document.getElementById('property_dept')?.value.trim()) {
+            errors.push({ msg: '<strong>Department</strong> is required.', section: 'sectionA' });
+        }
 
         // Section C — Originating bank account (DB mode only)
         const bankKeyEl = document.getElementById('bank_account_key');

@@ -257,6 +257,7 @@ class SubmissionEventTests(unittest.TestCase):
             "recv_account_name": "Acct", "recv_account_number": "123", "recv_routing_number": "456",
             "recv_bank_address": "",
             "amount": 100.0, "request_type": "ACH",
+            "classification": "corporate", "property_dept": "Test Dept",
         }
         with patch.object(db, "get_connection", return_value=fake_conn):
             db.insert_transaction(data)

@@ -109,6 +109,7 @@ _ILLEGAL_FILENAME_CHARS = '"*:<>?/\\|'
 _msal_app       = None
 _site_id_cache  = None
 _drive_id_cache = None
+_properties_cache = None
 
 
 def _config():
@@ -184,6 +185,47 @@ def get_drive_id() -> str:
     resp = _graph_request("GET", f"{GRAPH_BASE}/sites/{site_id}/lists/{library_id}/drive")
     _drive_id_cache = resp.json()["id"]
     return _drive_id_cache
+
+
+def get_properties() -> list:
+    """
+    Return active properties from the Properties_0 SharePoint list (same site
+    as the attachment library, separate list ID in SHAREPOINT_PROPERTY_LIST_ID)
+    for the intake Property/Corporate entity picker:
+        [{"entity_number": int, "name": str}, ...], sorted by name.
+    Excludes INACTIVE = true rows. Cached for the life of the running process
+    (same pattern as get_site_id()/get_drive_id()) — restart the app to pick up
+    newly added/renamed properties.
+    """
+    global _properties_cache
+    if _properties_cache is not None:
+        return _properties_cache
+
+    list_id = os.environ.get("SHAREPOINT_PROPERTY_LIST_ID", "")
+    if not list_id:
+        raise RuntimeError("SHAREPOINT_PROPERTY_LIST_ID must be set in .env before loading properties.")
+    site_id = get_site_id()
+
+    results = []
+    url    = f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items"
+    params = {"$expand": "fields", "$top": 200}
+    while url:
+        resp = _graph_request("GET", url, params=params)
+        body = resp.json()
+        for item in body.get("value", []):
+            fields = item.get("fields", {})
+            if fields.get("INACTIVE"):
+                continue
+            entity_number = fields.get("ENTITY_NUMBER")
+            name = (fields.get("PROPERTY_NAME") or "").strip()
+            if entity_number is None or not name:
+                continue
+            results.append({"entity_number": int(entity_number), "name": name})
+        url    = body.get("@odata.nextLink")
+        params = None  # nextLink already includes the query string
+    results.sort(key=lambda p: p["name"])
+    _properties_cache = results
+    return results
 
 
 def _sanitize_filename(filename: str) -> str:

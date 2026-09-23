@@ -47,7 +47,7 @@ class DraftCreationDbTests(unittest.TestCase):
 
     def _fake_conn(self, txn_key=99):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.side_effect = [(1,), (10,), (20,), (txn_key,)]
+        fake_cursor.fetchone.side_effect = [(10,), (20,), (txn_key,)]
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
         return fake_conn, fake_cursor
@@ -183,7 +183,7 @@ class DraftFinalizeDbTests(unittest.TestCase):
     def _finalize_data(self, **overrides):
         data = {
             "approver_key": 2, "controller_key": 3, "bank_account_key": 5,
-            "request_type": "ACH", "property_dept": "", "property_code": "",
+            "request_type": "ACH", "classification": "corporate", "property_dept": "", "property_code": "",
             "treasury_service_date": "2026-10-01", "amount": 1000.0, "currency": "USD",
             "payment_purpose": "Vendor payment", "urgent": False, "urgency_reason": "",
             "recv_payee_name": "Payee", "recv_bank_name": "Bank", "recv_account_name": "",
@@ -197,7 +197,7 @@ class DraftFinalizeDbTests(unittest.TestCase):
 
     def test_33_34_35_writes_submitted_approver_assigned_and_assignment(self):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.side_effect = [(10, 20), (77,)]  # guard SELECT, WorkflowAssignment.Assignment_Key
+        fake_cursor.fetchone.side_effect = [(3,), (10, 20), (77,)]  # entity resolve, guard SELECT, WorkflowAssignment.Assignment_Key
         fake_cursor.rowcount = 1
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
@@ -221,7 +221,7 @@ class DraftFinalizeDbTests(unittest.TestCase):
 
     def test_32_status_stage_owner_transition(self):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.side_effect = [(10, 20), (77,)]
+        fake_cursor.fetchone.side_effect = [(3,), (10, 20), (77,)]
         fake_cursor.rowcount = 1
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
@@ -236,7 +236,7 @@ class DraftFinalizeDbTests(unittest.TestCase):
 
     def test_29_30_double_submit_second_call_raises_workflow_conflict(self):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.return_value = None  # second call: no longer a Draft
+        fake_cursor.fetchone.side_effect = [(3,), None]  # entity resolve succeeds, then guard SELECT: no longer a Draft
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
         with patch.object(db, "get_connection", return_value=fake_conn):
@@ -249,7 +249,7 @@ class DraftFinalizeDbTests(unittest.TestCase):
 
     def test_31_no_completed_or_other_extra_workflow_event(self):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.side_effect = [(10, 20), (77,)]
+        fake_cursor.fetchone.side_effect = [(3,), (10, 20), (77,)]
         fake_cursor.rowcount = 1
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
@@ -432,6 +432,7 @@ class FinalizeDraftRouteTests(unittest.TestCase):
             "request_id": "TXN-2026-D100",
             "request_type": "ACH",
             "treasury_service_date": "2026-10-01",
+            "classification": "corporate",
             "property_dept": "Sunset Ridge",
             "approver_key": "2", "controller_key": "3",
             "amount": "1000.00", "currency": "USD",
@@ -519,6 +520,7 @@ class BrandNewSubmissionRegressionTests(unittest.TestCase):
             "form_mode": "submit",
             "transaction_key": "", "request_id": "",
             "request_type": "ACH", "treasury_service_date": "2026-10-01",
+            "classification": "corporate",
             "property_dept": "Sunset Ridge",
             "approver_key": "2", "controller_key": "3",
             "amount": "1000.00", "currency": "USD",
@@ -759,13 +761,13 @@ class PreparedDateNotResetTests(unittest.TestCase):
 
     def test_finalize_draft_submission_sql_never_touches_prepared_date(self):
         fake_cursor = MagicMock()
-        fake_cursor.fetchone.side_effect = [(10, 20), (77,)]
+        fake_cursor.fetchone.side_effect = [(3,), (10, 20), (77,)]
         fake_cursor.rowcount = 1
         fake_conn = MagicMock()
         fake_conn.cursor.return_value = fake_cursor
         data = {
             "approver_key": 2, "controller_key": 3, "bank_account_key": 5,
-            "request_type": "ACH", "property_dept": "", "property_code": "",
+            "request_type": "ACH", "classification": "corporate", "property_dept": "", "property_code": "",
             "treasury_service_date": "2026-10-01", "amount": 1000.0, "currency": "USD",
             "payment_purpose": "Vendor payment", "urgent": False, "urgency_reason": "",
             "recv_payee_name": "Payee", "recv_bank_name": "Bank", "recv_account_name": "",

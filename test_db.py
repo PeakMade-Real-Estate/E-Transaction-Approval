@@ -176,7 +176,7 @@ class WorkflowStageSyncQueryTests(unittest.TestCase):
             "recv_contact_email": "", "recv_contact_phone": "", "recv_bank_name": "Bank",
             "recv_account_name": "Acct", "recv_account_number": "123", "recv_routing_number": "456",
             "recv_bank_address": "",
-            "amount": 100.0, "request_type": "ACH",
+            "amount": 100.0, "request_type": "ACH", "classification": "corporate",
         }
         with patch.object(db, "get_connection", return_value=fake_conn):
             result = db.insert_transaction(data)

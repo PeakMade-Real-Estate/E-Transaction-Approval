@@ -22,6 +22,7 @@ def valid_form(**overrides):
         "treasury_service_date": "2026-10-01",
         "prepared_by_key": "1",
         "prepared_date": "2026-09-18",
+        "classification": "corporate",
         "property_dept": "Sunset Ridge Apartments",
         "approver_key": "2",
         "controller_key": "3",

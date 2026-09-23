@@ -311,6 +311,32 @@ def get_transaction_for_workflow(request_id: str):
     }
 
 
+def get_last_rfi_event_datetime(transaction_key):
+    """
+    Return the Event_DateTime of the most recent Request More Information
+    WorkflowEvent for this transaction, or None. Used to confirm the requester
+    attached a new file after the RFI was raised before allowing
+    requester_respond (app.py's _handle_sql_workflow_action) when no comment
+    was provided either.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT TOP (1) Event_DateTime
+            FROM etransactions.WorkflowEvent
+            WHERE Transaction_Key = ? AND Event_Type = ?
+            ORDER BY Event_DateTime DESC
+            """,
+            [transaction_key, workflow.EVENT_RFI_REQUESTED],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_last_rfi_origin_status(transaction_key):
     """
     Return the From_Status of the most recent Request More Information WorkflowEvent
@@ -1201,17 +1227,17 @@ BANK_ACCOUNT_SERVICE_FLAGS = (
 
 
 # ─────────────────────────────────────────────────────────────
-#  Bank Account lifecycle audit (BankAccountEvent) — NOT YET LIVE
+#  Bank Account lifecycle audit (BankAccountEvent)
 #
-#  etransactions.BankAccountEvent does not exist in the database yet. This
-#  section implements the full, ready-to-activate audit/event layer (types,
-#  change-diffing, the atomic insert helper) so it can be wired into
-#  create_bank_account()/update_bank_account()/the close route with a small,
-#  low-risk follow-up change once the table has been created. It is
-#  deliberately NOT called from any live code path yet — doing so today would
-#  break Bank Account create/edit/close with "Invalid object name" errors.
-#
-#  Proposed DDL (run this before wiring the calls below into live CRUD):
+#  etransactions.BankAccountEvent was created live 2026-09-22 (schema below,
+#  confirmed via INFORMATION_SCHEMA/sys.foreign_keys). create_bank_account()
+#  and update_bank_account() now write BankAccountEvent rows atomically (same
+#  connection/cursor, single commit) — create_bank_account() always writes
+#  BANK_ACCOUNT_CREATED; update_bank_account() writes BANK_ACCOUNT_CLOSED/
+#  BANK_ACCOUNT_REOPENED only on an actual Status transition (via
+#  bank_account_lifecycle_event_for_status_change()) — an ordinary field edit
+#  that doesn't change Status writes no event at all. BANK_ACCOUNT_UPDATED is
+#  defined but intentionally not yet wired in (out of scope for this pass).
 #
 #    CREATE TABLE etransactions.BankAccountEvent (
 #        BankAccountEvent_Key INT IDENTITY PRIMARY KEY,
@@ -1320,8 +1346,9 @@ def record_bank_account_event(cur, bank_account_key, *, event_type, performed_by
     """
     Insert a BankAccountEvent row using the CALLER's own cursor (not a new
     connection), so it commits atomically as part of whatever BankAccount
-    INSERT/UPDATE the caller is already performing. NOT YET CALLED from live
-    code — see the module-level note above this section.
+    INSERT/UPDATE the caller is already performing. Called from
+    create_bank_account() and update_bank_account() — see the module-level
+    note above this section.
     """
     cur.execute(
         "INSERT INTO etransactions.BankAccountEvent ("
@@ -1603,6 +1630,10 @@ def create_bank_account(data: dict, actor_user_key: int) -> int:
             ],
         )
         key = cur.fetchone()[0]
+        record_bank_account_event(
+            cur, key, event_type=BANK_ACCOUNT_EVENT_CREATED, performed_by_user_key=actor_user_key,
+            new_status=data["status"],
+        )
         conn.commit()
         return key
     except Exception:
@@ -1651,9 +1682,24 @@ def update_bank_account(bank_account_key: int, data: dict, actor_user_key: int) 
     try:
         cur = conn.cursor()
         cur.execute(
+            "SELECT Status FROM etransactions.BankAccount WHERE BankAccount_Key = ?",
+            [bank_account_key],
+        )
+        row = cur.fetchone()
+        previous_status = row[0] if row else None
+
+        cur.execute(
             f"UPDATE etransactions.BankAccount SET {', '.join(assignments)} WHERE BankAccount_Key = ?",
             params,
         )
+
+        new_status = data["status"]
+        lifecycle_event = bank_account_lifecycle_event_for_status_change(previous_status, new_status)
+        if lifecycle_event is not None:
+            record_bank_account_event(
+                cur, bank_account_key, event_type=lifecycle_event, performed_by_user_key=actor_user_key,
+                previous_status=previous_status, new_status=new_status,
+            )
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1701,6 +1747,69 @@ def reserve_request_id() -> str:
         conn.close()
 
 
+def resolve_entity_key(classification, *, property_entity_number=None, property_name=None):
+    """
+    Resolve the BusinessEntity.Entity_Key for a new/edited transaction from the
+    requester's Property/Corporate choice on intake (get-or-create for
+    Property; a single shared Corporate entity for now — see intake.html).
+
+    Property: get-or-create matched on BusinessEntity.Entity_ID = str(int(
+    property_entity_number)) — the SharePoint Properties_0 list's ENTITY_NUMBER
+    — so the same property reuses the same Entity_Key on every future
+    submission instead of creating a duplicate row each time.
+
+    Corporate: returns the existing single active Corporate BusinessEntity —
+    no per-department entity yet; the department itself stays free text
+    (Property_Department_Text).
+
+    Raises ValueError (a user-facing validation error, not a system failure)
+    if classification isn't recognized, Property is chosen without a
+    resolvable property_entity_number/property_name, or no active Corporate
+    BusinessEntity exists in the current environment.
+    """
+    classification = (classification or "").strip().lower()
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+
+        if classification == "property":
+            if not property_entity_number or not (property_name or "").strip():
+                raise ValueError("A property must be selected.")
+            entity_id = str(int(property_entity_number))
+            cur.execute(
+                "SELECT Entity_Key FROM etransactions.BusinessEntity "
+                "WHERE Entity_ID = ? AND Classification = 'Property'",
+                [entity_id],
+            )
+            row = cur.fetchone()
+            if row:
+                return row[0]
+            cur.execute(
+                "INSERT INTO etransactions.BusinessEntity "
+                "(Entity_ID, Property_Department_Name, Classification, Active_Status) "
+                "OUTPUT INSERTED.Entity_Key VALUES (?, ?, 'Property', 1)",
+                [entity_id, property_name.strip()],
+            )
+            entity_key = cur.fetchone()[0]
+            conn.commit()
+            return entity_key
+
+        if classification == "corporate":
+            cur.execute(
+                "SELECT TOP 1 Entity_Key FROM etransactions.BusinessEntity "
+                "WHERE Active_Status = 1 AND Classification = 'Corporate' "
+                "ORDER BY Entity_Key"
+            )
+            row = cur.fetchone()
+            if row is None:
+                raise ValueError("No active Corporate entity is configured. Contact an administrator.")
+            return row[0]
+
+        raise ValueError("Select whether this request is for a Property or Corporate.")
+    finally:
+        conn.close()
+
+
 def insert_transaction(data: dict) -> str:
     """
     Insert all rows for a new transaction in a single transaction.
@@ -1722,15 +1831,19 @@ def insert_transaction(data: dict) -> str:
     # (Batch 7 Part 8) — no fallback to hard-coded Python thresholds.
     rule = resolve_approval_rule(data["amount"])
 
+    # Resolve/get-or-create the BusinessEntity for the requester's Property/
+    # Corporate choice BEFORE opening the transactional connection below — see
+    # resolve_entity_key(). Raises ValueError (caller surfaces as a validation
+    # error) if the choice can't be resolved.
+    entity_key = resolve_entity_key(
+        data.get("classification"),
+        property_entity_number=data.get("property_entity_number"),
+        property_name=data.get("property_dept"),
+    )
+
     conn = get_connection()
     try:
         cur = conn.cursor()
-
-        # Look up the only/first active BusinessEntity
-        cur.execute(
-            "SELECT TOP 1 Entity_Key FROM [etransactions].[BusinessEntity] WHERE Active_Status = 1"
-        )
-        entity_key = cur.fetchone()[0]
 
         # Insert Beneficiary (payee)
         cur.execute(
@@ -1955,15 +2068,22 @@ def create_draft(data: dict):
     now = datetime.now()
     today = now.date()
 
+    # Entity_Key is nullable on ETransaction — a Draft may be saved before the
+    # requester has chosen Property/Corporate (classification blank means "not
+    # chosen yet", not an error, unlike insert_transaction()/
+    # finalize_draft_submission() where it's already been validated as required).
+    classification = (data.get("classification") or "").strip().lower()
+    entity_key = None
+    if classification:
+        entity_key = resolve_entity_key(
+            classification,
+            property_entity_number=data.get("property_entity_number"),
+            property_name=data.get("property_dept"),
+        )
+
     conn = get_connection()
     try:
         cur = conn.cursor()
-
-        cur.execute(
-            "SELECT TOP 1 Entity_Key FROM [etransactions].[BusinessEntity] WHERE Active_Status = 1"
-        )
-        entity_key_row = cur.fetchone()
-        entity_key = entity_key_row[0] if entity_key_row else None
 
         cur.execute(
             "INSERT INTO [etransactions].[Beneficiary] "
@@ -2044,6 +2164,18 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
     passing back a DDM-masked placeholder as if it were a real edited value.
     """
     now = datetime.now()
+
+    # See create_draft() — classification may still be blank while editing an
+    # in-progress Draft; Entity_Key stays NULL/unchanged until it's chosen.
+    classification = (data.get("classification") or "").strip().lower()
+    entity_key = None
+    if classification:
+        entity_key = resolve_entity_key(
+            classification,
+            property_entity_number=data.get("property_entity_number"),
+            property_name=data.get("property_dept"),
+        )
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -2086,13 +2218,15 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
         cur.execute(
             "UPDATE [etransactions].[ETransaction] SET"
             "  Property_Department_Text = ?, Entity_ID_Text = ?,"
-            "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
+            + ("  Entity_Key = ?," if classification else "")
+            + "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?,"
             "  Amount = ?, Currency = ?, Payment_Purpose = ?,"
             "  Urgent_Flag = ?, Urgency_Reason = ?, Modified_DateTime = ?"
             " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
             [
                 data.get("property_dept", ""), data.get("property_code", ""),
+                *([entity_key] if classification else []),
                 data["bank_account_key"], data["approver_key"], data["controller_key"],
                 data["request_type"], data["treasury_service_date"],
                 data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
@@ -2134,10 +2268,12 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
                    t.Urgent_Flag, t.Urgency_Reason, t.Prepared_Date,
                    b.Payee_Name, b.Contact_Name, b.Contact_Email, b.Contact_Phone,
                    bi.Receiving_Bank_Name, bi.Receiving_Account_Name,
-                   bi.Receiving_Account_Number, bi.Receiving_Routing_Number, bi.Bank_Beneficiary_Address
+                   bi.Receiving_Account_Number, bi.Receiving_Routing_Number, bi.Bank_Beneficiary_Address,
+                   be.Classification, be.Entity_ID
             FROM [etransactions].[ETransaction] t
             JOIN [etransactions].[Beneficiary] b ON b.Beneficiary_Key = t.Beneficiary_Key
             JOIN [etransactions].[BeneficiaryBankInstruction] bi ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
+            LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = t.Entity_Key
             WHERE t.Transaction_Key = ? AND t.PreparedBy_User_Key = ? AND t.Current_Status = ?
             """,
             [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
@@ -2150,11 +2286,14 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
     finally:
         conn.close()
 
+    classification = (d["Classification"] or "").strip().lower()
     return {
         "transaction_key":  d["Transaction_Key"],
         "request_id":       d["Request_ID"],
         "property_dept":    d["Property_Department_Text"] or "",
         "property_code":    d["Entity_ID_Text"] or "",
+        "classification":   classification,
+        "property_entity_number": int(d["Entity_ID"]) if classification == "property" and d["Entity_ID"] else None,
         "bank_account_key": d["OriginatingBankAccount_Key"],
         "approver_key":     d["SelectedApprover_User_Key"],
         "controller_key":   d["SelectedController_User_Key"],
@@ -2227,6 +2366,16 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
     today = now.date()
     initial_status = workflow.STATUS_PENDING_APPROVER
 
+    # classification is required by app.py's full final-submission validator by
+    # this point, unlike create_draft()/update_draft() where it may still be
+    # blank — always resolved here so Entity_Key reflects the final choice even
+    # if it was changed after the draft was first saved.
+    entity_key = resolve_entity_key(
+        data.get("classification"),
+        property_entity_number=data.get("property_entity_number"),
+        property_name=data.get("property_dept"),
+    )
+
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -2267,7 +2416,7 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
 
         cur.execute(
             "UPDATE [etransactions].[ETransaction] SET"
-            "  Property_Department_Text = ?, Entity_ID_Text = ?,"
+            "  Property_Department_Text = ?, Entity_ID_Text = ?, Entity_Key = ?,"
             "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  CurrentOwner_User_Key = ?, ApprovalRule_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?, Submitted_Date = ?,"
@@ -2278,7 +2427,7 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             "  Modified_DateTime = ?"
             " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
             [
-                data.get("property_dept", ""), data.get("property_code", ""),
+                data.get("property_dept", ""), data.get("property_code", ""), entity_key,
                 data["bank_account_key"], data["approver_key"], data["controller_key"],
                 data["approver_key"], data["approval_rule_key"],
                 data["request_type"], data["treasury_service_date"], now,

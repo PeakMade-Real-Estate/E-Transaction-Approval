@@ -20,7 +20,7 @@ from flask import (
     Flask, render_template, request,
     redirect, url_for, session, flash, jsonify, abort, Response,
 )
-from datetime import datetime
+from datetime import datetime, timezone
 import copy
 import os
 import random
@@ -389,6 +389,62 @@ def _validate_bank_account_form(data, *, is_new):
     return errors
 
 
+def _resolve_property_name(entity_number_raw):
+    """
+    Look up a property's display name from the cached SharePoint properties
+    list by ENTITY_NUMBER, or None if not found/SharePoint unavailable — never
+    trust client-supplied free text for a Property-classified request's name.
+    """
+    try:
+        entity_number = int(entity_number_raw)
+    except (TypeError, ValueError):
+        return None
+    try:
+        for p in sharepoint.get_properties():
+            if p["entity_number"] == entity_number:
+                return p["name"]
+    except Exception:
+        app.logger.exception("Unable to load SharePoint properties list")
+    return None
+
+
+def _require_classification(frm, errors):
+    """Shared Property/Corporate requirement for both final-submit and Save Draft validators."""
+    classification = (frm.get("classification") or "").strip().lower()
+    if classification not in ("property", "corporate"):
+        errors.append("Select whether this request is for a Property or Corporate.")
+    elif classification == "property":
+        if not (frm.get("property_entity_number") or "").strip():
+            errors.append("Property is required.")
+    else:
+        if not (frm.get("property_dept") or "").strip():
+            errors.append("Property / Department is required.")
+
+
+def _intake_property_fields(frm):
+    """
+    Shared Property/Corporate field resolution for draft save, draft finalize,
+    and direct submit — the property's display name is always re-resolved
+    server-side from ENTITY_NUMBER (never trusts client-supplied text) so
+    Property_Department_Text can't be spoofed to mismatch the selected property.
+    """
+    classification = (frm.get("classification") or "").strip().lower()
+    property_entity_number = (frm.get("property_entity_number") or "").strip()
+    property_dept = frm.get("property_dept", "")
+    property_code = frm.get("entity_id", "")
+    if classification == "property":
+        resolved_name = _resolve_property_name(property_entity_number)
+        if resolved_name:
+            property_dept = resolved_name
+        property_code = property_entity_number
+    return {
+        "classification":         classification,
+        "property_entity_number": property_entity_number,
+        "property_dept":          property_dept,
+        "property_code":          property_code,
+    }
+
+
 def _validate_intake_submission(frm, *, files_present: dict, bank_account_status, has_stored_receiving_bank_instruction=False, prepared_by_user_key=None):
     """
     Authoritative SERVER-SIDE validation for /intake/submit — mirrors the
@@ -421,7 +477,7 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     # submission earlier if the authenticated identity can't be resolved.
     require("request_type", "Request Type")
     require("treasury_service_date", "Requested Treasury Service Date")
-    require("property_dept", "Property / Department")
+    _require_classification(frm, errors)
     require("approver_key", "Approver")
     require("controller_key", "Controller")
     require("payment_purpose", "Payment Purpose / Description")
@@ -546,6 +602,15 @@ def _validate_draft_submission(frm, *, is_update=False):
     if not is_update:
         require("recv_account_number", "Receiving Account Number")
 
+    # Property/Corporate is allowed to stay unset while drafting (Entity_Key
+    # is nullable on ETransaction) — but a PARTIAL choice (Property selected
+    # without an actual property) is still invalid.
+    classification = (frm.get("classification") or "").strip().lower()
+    if classification == "property" and not (frm.get("property_entity_number") or "").strip():
+        errors.append("Select a Property, or switch to Corporate.")
+    elif classification and classification not in ("property", "corporate"):
+        errors.append("Select whether this request is for a Property or Corporate.")
+
     request_type = (frm.get("request_type") or "").strip()
     if request_type and request_type not in _DRAFT_ALLOWED_REQUEST_TYPES:
         errors.append("Unsupported Request Type.")
@@ -668,7 +733,25 @@ def inject_globals():
         "can_switch_role": identity["source"] == "dev",
         "can_view_bank_accounts": can_view_bank_accounts(),
         "can_edit_bank_accounts": can_edit_bank_accounts(),
+        "properties": _get_properties_safe(),
     }
+
+
+def _get_properties_safe():
+    """
+    Cached SharePoint Properties_0 list for the intake Property/Corporate
+    picker, or [] if SharePoint is disabled/unavailable — injected into every
+    template context (via inject_globals()) so intake.html's dropdown never
+    hits an undefined variable regardless of which render_template() call path
+    produced the page.
+    """
+    if not sharepoint_enabled():
+        return []
+    try:
+        return sharepoint.get_properties()
+    except Exception:
+        app.logger.exception("Unable to load SharePoint properties list")
+        return []
 
 
 # [AUTH] Development role gate — replace with Azure AD / MSAL authentication
@@ -757,8 +840,6 @@ def role_select():
         role = request.form.get("role", "")
         if role in available_roles:
             session["role"] = role
-        return redirect(url_for("dashboard"))
-    if current_roles():
         return redirect(url_for("dashboard"))
 
     # Local-dev-only "Acting as" AppUser selector (Batch 7 Part 5) — lets
@@ -892,8 +973,7 @@ def _handle_save_draft(frm, prepared_by_user):
         "prepared_by_key":  prepared_by_user["user_key"],
         "request_type":     frm.get("request_type", "").strip(),
         "treasury_service_date": frm.get("treasury_service_date", "").strip(),
-        "property_dept":    frm.get("property_dept", ""),
-        "property_code":    frm.get("entity_id", ""),
+        **_intake_property_fields(frm),
         "amount":           float((frm.get("amount") or "0").replace(",", "") or 0),
         "currency":         frm.get("currency", "USD"),
         "payment_purpose":  frm.get("payment_purpose", ""),
@@ -1321,8 +1401,7 @@ def intake_submit():
                     "controller_key":   int(frm.get("controller_key", 0)),
                     "bank_account_key": int(frm.get("bank_account_key", 0)),
                     "request_type":          frm.get("request_type", ""),
-                    "property_dept":         frm.get("property_dept", ""),
-                    "property_code":         frm.get("entity_id", ""),
+                    **_intake_property_fields(frm),
                     "treasury_service_date": frm.get("treasury_service_date", ""),
                     "amount":                amount,
                     "currency":              frm.get("currency", "USD"),
@@ -1397,8 +1476,7 @@ def intake_submit():
                 "controller_key":   int(frm.get("controller_key", 0)),
                 "bank_account_key": int(frm.get("bank_account_key", 0)),
                 "request_type":          frm.get("request_type", ""),
-                "property_dept":         frm.get("property_dept", ""),
-                "property_code":         frm.get("entity_id", ""),
+                **_intake_property_fields(frm),
                 "treasury_service_date": frm.get("treasury_service_date", ""),
                 "prepared_date":         datetime.now().strftime("%Y-%m-%d"),
                 "amount":                amount,
@@ -2206,6 +2284,41 @@ def request_action(request_id):
     return _handle_legacy_session_action(request_id)
 
 
+def _has_new_attachment_since_rfi(transaction_key, request_id):
+    """
+    True if any SharePoint attachment for this request was uploaded after the
+    most recent Request More Information event — used to allow a commentless
+    requester_respond when the requester's "new information" was a file
+    attached via the Additional Attachments section instead of a comment.
+    Fails closed (False) if SharePoint or the RFI timestamp is unavailable.
+    """
+    if not sharepoint_enabled():
+        return False
+    try:
+        rfi_dt = db.get_last_rfi_event_datetime(transaction_key)
+        if rfi_dt is None:
+            return False
+        # Event_DateTime is stored as naive local server time (datetime.now() in
+        # db.py); SharePoint/Graph's createdDateTime is UTC. .astimezone() on a
+        # naive datetime presumes the system's local timezone, so this converts
+        # both sides to the same aware UTC reference for a correct comparison
+        # (a naive numeric comparison previously made every attachment look new).
+        rfi_dt_utc = rfi_dt.astimezone(timezone.utc)
+        for att in sharepoint.list_attachments(request_id):
+            uploaded_raw = att.get("uploaded_date", "")
+            if not uploaded_raw:
+                continue
+            try:
+                uploaded_dt = datetime.fromisoformat(uploaded_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if uploaded_dt > rfi_dt_utc:
+                return True
+    except Exception:
+        app.logger.exception("Unable to check for new attachments since RFI on %s", request_id)
+    return False
+
+
 def _handle_sql_workflow_action(request_id, txn):
     """Authorize and apply a workflow action against a SQL-backed transaction."""
     action  = request.form.get("action", "")
@@ -2231,6 +2344,22 @@ def _handle_sql_workflow_action(request_id, txn):
     if action == workflow.ACTION_CANCEL and not comment:
         flash("A cancellation reason is required.", "warning")
         return redirect(url_for("request_detail", request_id=request_id))
+
+    if action == workflow.ACTION_REQUESTER_RESPOND and not comment:
+        # A resubmission must carry new information — either a comment here,
+        # a file attached in this same submission (resubmitModal), or a file
+        # attached earlier via the Additional Attachments section after the
+        # RFI was raised. Without this, requester_respond would silently move
+        # the transaction back to the approver with nothing new to review.
+        resubmit_file = request.files.get("resubmit_file")
+        has_new_file = bool(resubmit_file and resubmit_file.filename)
+        if not has_new_file and not _has_new_attachment_since_rfi(txn["transaction_key"], request_id):
+            flash(
+                "Add a comment or attach a new file before resubmitting — "
+                "the approver needs to see what changed.",
+                "warning",
+            )
+            return redirect(url_for("request_detail", request_id=request_id))
 
     try:
         # Visibility vs. action authorization (Part 14): workflow.authorize_action()
@@ -2286,6 +2415,25 @@ def _handle_sql_workflow_action(request_id, txn):
                 flash(f"{evidence_label} is required to complete this action.", "warning")
                 return redirect(url_for("request_detail", request_id=request_id))
             evidence_correlation_id = uploaded.get("correlation_id")
+
+        # Optional new file attached in the resubmitModal (comment may satisfy
+        # the requester_respond requirement on its own — see the guard above —
+        # so this file is best-effort, not required, unlike _EVIDENCE_REQUIRED_ACTIONS).
+        if action == workflow.ACTION_REQUESTER_RESPOND:
+            resubmit_file = request.files.get("resubmit_file")
+            if resubmit_file and resubmit_file.filename and sharepoint_enabled():
+                try:
+                    uploaded = sharepoint.upload_attachment(
+                        request_id, resubmit_file,
+                        section=sharepoint.SECTION_ADDITIONAL, doc_type=sharepoint.DOC_TYPE_OTHER,
+                        uploaded_by_role=current_roles_display(), description=comment,
+                    )
+                    if uploaded:
+                        evidence_correlation_id = uploaded.get("correlation_id")
+                except Exception:
+                    app.logger.exception("Resubmit attachment upload failed for %s", request_id)
+                    flash("The new attachment could not be uploaded; the resubmission was not completed.", "danger")
+                    return redirect(url_for("request_detail", request_id=request_id))
 
         if satisfied and len(satisfied) > 1:
             note = f"One approval satisfied: {', '.join(satisfied)} (same employee)."

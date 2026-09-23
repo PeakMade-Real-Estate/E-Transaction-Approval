@@ -195,3 +195,119 @@ class StatusVocabularyTests(unittest.TestCase):
         for fn in (db.create_bank_account, db.update_bank_account):
             source = inspect.getsource(fn)
             self.assertNotIn("DELETE", source.upper())
+
+
+class LiveWiringTests(unittest.TestCase):
+    """
+    2026-09-22: etransactions.BankAccountEvent now exists live. These tests
+    confirm create_bank_account()/update_bank_account() actually write the
+    lifecycle event atomically (same cursor/connection, before commit), not
+    just that the pure helper functions above are correct in isolation.
+    """
+
+    def _new_account_data(self, entity_key, status="Open"):
+        return {
+            "entity_key": entity_key, "account_classification": "Operating",
+            "bank_name": "Wells Fargo Bank", "account_name_id": "", "account_title": "Operating",
+            "account_title_modifier": "", "system_account_name": "",
+            "account_number": "12345678", "routing_number": "021000021",
+            "transit_number_canada": "", "institution_number_canada": "",
+            "gl_account_number": "", "gl_account_name": "", "tax_id_number": "",
+            "address": "", "phone_number": "", "account_type": "Checking",
+            "status": status, "date_opened": "2026-01-01", "date_closed": "",
+            "bank_contact_name": "", "notes": "",
+        }
+
+    def _fake_conn_for_create(self, new_key=99):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = [new_key]
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        return fake_conn, fake_cursor
+
+    def _fake_conn_for_update(self, previous_status):
+        fake_cursor = MagicMock()
+        fake_cursor.fetchone.return_value = (previous_status,)
+        fake_conn = MagicMock()
+        fake_conn.cursor.return_value = fake_cursor
+        return fake_conn, fake_cursor
+
+    def test_new_property_account_writes_created_event(self):
+        fake_conn, fake_cursor = self._fake_conn_for_create(new_key=201)
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            key = db.create_bank_account(self._new_account_data(entity_key=7), actor_user_key=20)
+        self.assertEqual(key, 201)
+        insert_calls = [c for c in fake_cursor.execute.call_args_list
+                        if "INSERT INTO etransactions.BankAccountEvent" in c[0][0]]
+        self.assertEqual(len(insert_calls), 1)
+        params = insert_calls[0][0][1]
+        self.assertEqual(params[0], 201)  # BankAccount_Key
+        self.assertEqual(params[1], db.BANK_ACCOUNT_EVENT_CREATED)
+        self.assertEqual(params[2], 20)  # PerformedBy_User_Key
+        fake_conn.commit.assert_called_once()
+
+    def test_new_corporate_account_writes_created_event(self):
+        fake_conn, fake_cursor = self._fake_conn_for_create(new_key=202)
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            key = db.create_bank_account(self._new_account_data(entity_key=3), actor_user_key=20)
+        self.assertEqual(key, 202)
+        insert_calls = [c for c in fake_cursor.execute.call_args_list
+                        if "INSERT INTO etransactions.BankAccountEvent" in c[0][0]]
+        self.assertEqual(len(insert_calls), 1)
+        self.assertEqual(insert_calls[0][0][1][1], db.BANK_ACCOUNT_EVENT_CREATED)
+        fake_conn.commit.assert_called_once()
+
+    def test_closed_property_account_writes_closed_event(self):
+        fake_conn, fake_cursor = self._fake_conn_for_update(previous_status="Open")
+        data = self._new_account_data(entity_key=7, status="Closed")
+        data["date_closed"] = "2026-09-22"
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            db.update_bank_account(55, data, actor_user_key=21)
+        insert_calls = [c for c in fake_cursor.execute.call_args_list
+                        if "INSERT INTO etransactions.BankAccountEvent" in c[0][0]]
+        self.assertEqual(len(insert_calls), 1)
+        params = insert_calls[0][0][1]
+        self.assertEqual(params[0], 55)
+        self.assertEqual(params[1], db.BANK_ACCOUNT_EVENT_CLOSED)
+        self.assertEqual(params[2], 21)
+        self.assertEqual(params[5], "Open")     # Previous_Status
+        self.assertEqual(params[6], "Closed")   # New_Status
+        fake_conn.commit.assert_called_once()
+
+    def test_closed_corporate_account_writes_closed_event(self):
+        fake_conn, fake_cursor = self._fake_conn_for_update(previous_status="Open")
+        data = self._new_account_data(entity_key=3, status="Closed")
+        data["date_closed"] = "2026-09-22"
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            db.update_bank_account(56, data, actor_user_key=21)
+        insert_calls = [c for c in fake_cursor.execute.call_args_list
+                        if "INSERT INTO etransactions.BankAccountEvent" in c[0][0]]
+        self.assertEqual(len(insert_calls), 1)
+        self.assertEqual(insert_calls[0][0][1][1], db.BANK_ACCOUNT_EVENT_CLOSED)
+        fake_conn.commit.assert_called_once()
+
+    def test_ordinary_edit_writes_no_lifecycle_event(self):
+        # Status unchanged (Open -> Open) — no BankAccountEvent row at all.
+        fake_conn, fake_cursor = self._fake_conn_for_update(previous_status="Open")
+        data = self._new_account_data(entity_key=7, status="Open")
+        data["notes"] = "Updated contact info"
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            db.update_bank_account(57, data, actor_user_key=22)
+        insert_calls = [c for c in fake_cursor.execute.call_args_list
+                        if "INSERT INTO etransactions.BankAccountEvent" in c[0][0]]
+        self.assertEqual(insert_calls, [])
+        fake_conn.commit.assert_called_once()
+
+    def test_event_insert_happens_before_commit_same_transaction(self):
+        # #8: BankAccount write and BankAccountEvent write are on the same
+        # cursor/connection and commit together — Power Automate never sees a
+        # partially-applied state (event without the underlying account change,
+        # or vice versa).
+        fake_conn, fake_cursor = self._fake_conn_for_create(new_key=301)
+        with patch.object(db, "get_connection", return_value=fake_conn):
+            db.create_bank_account(self._new_account_data(entity_key=7), actor_user_key=20)
+        insert_sql_calls = [c[0][0] for c in fake_cursor.execute.call_args_list]
+        self.assertIn("INSERT INTO etransactions.BankAccount", insert_sql_calls[0])
+        self.assertIn("INSERT INTO etransactions.BankAccountEvent", insert_sql_calls[1])
+        fake_conn.commit.assert_called_once()
+

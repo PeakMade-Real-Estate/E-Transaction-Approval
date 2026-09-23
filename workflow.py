@@ -114,7 +114,7 @@ EVENT_TYPE_LABELS = {
     EVENT_CFO_ASSIGNED:           "Assigned to CFO",
     EVENT_READY_FOR_TREASURY:     "Ready for Treasury",
     EVENT_RFI_REQUESTED:          "More Information Requested",
-    EVENT_RFI_RESPONSE_SUBMITTED: "Additional Information Submitted",
+    EVENT_RFI_RESPONSE_SUBMITTED: "Additional Info Submitted",  # WorkflowEvent.Decision is varchar(30)
     EVENT_REASSIGNED:             "Reassigned",
     EVENT_CANCELLED:              "Cancelled",
     EVENT_TREASURY_INITIATED:     "Treasury Initiated",

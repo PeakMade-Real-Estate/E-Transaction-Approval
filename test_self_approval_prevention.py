@@ -17,6 +17,7 @@ def _draft_form(**overrides):
         "request_id": "",
         "request_type": "ACH",
         "treasury_service_date": "2026-10-01",
+        "classification": "corporate",
         "property_dept": "Sunset Ridge Apartments",
         "approver_key": "2",
         "controller_key": "3",
@@ -56,6 +57,7 @@ class ValidateIntakeSubmissionSelfSelectionTests(unittest.TestCase):
     def _base_form(self, **overrides):
         data = {
             "request_type": "ACH", "treasury_service_date": "2026-10-01",
+            "classification": "corporate",
             "property_dept": "Sunset Ridge", "approver_key": "2", "controller_key": "3",
             "payment_purpose": "Vendor payment", "currency": "USD", "amount": "1000",
             "bank_account_key": "5",
@@ -136,6 +138,7 @@ class IntakeSubmitSelfSelectionRouteTests(unittest.TestCase):
             "form_mode": "submit",
             "transaction_key": "", "request_id": "",
             "request_type": "ACH", "treasury_service_date": "2026-10-01",
+            "classification": "corporate",
             "property_dept": "Sunset Ridge",
             "approver_key": "11", "controller_key": "3",
             "amount": "1000.00", "currency": "USD",

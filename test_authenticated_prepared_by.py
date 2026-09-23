@@ -17,6 +17,7 @@ def _valid_intake_form(**overrides):
     data = {
         "request_type": "ACH",
         "treasury_service_date": "2026-10-01",
+        "classification": "corporate",
         "property_dept": "Sunset Ridge Apartments",
         "approver_key": "2",
         "controller_key": "3",
