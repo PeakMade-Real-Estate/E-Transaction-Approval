@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 import copy
 import os
 import random
+import time
 
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ; no-op if file is absent
@@ -40,6 +41,28 @@ from flask_wtf import CSRFProtect
 from flask_wtf.csrf import CSRFError
 
 app = Flask(__name__)
+
+DEFAULT_IDLE_TIMEOUT_MINUTES = 5
+SESSION_LAST_ACTIVITY_KEY = "last_verified_user_activity"
+ACTIVITY_UPDATE_MIN_SECONDS = 30
+EASY_AUTH_SESSION_COOKIE = "AppServiceAuthSession"
+
+
+def resolve_idle_timeout_minutes(env_value):
+    """Return a positive timeout in minutes, defaulting only when unset."""
+    if env_value is None or not str(env_value).strip():
+        return DEFAULT_IDLE_TIMEOUT_MINUTES
+    try:
+        minutes = int(str(env_value).strip())
+    except ValueError as exc:
+        raise RuntimeError("IDLE_TIMEOUT_MINUTES must be a positive integer.") from exc
+    if minutes <= 0:
+        raise RuntimeError("IDLE_TIMEOUT_MINUTES must be a positive integer.")
+    return minutes
+
+
+def _now_timestamp():
+    return time.time()
 
 
 def resolve_secret_key(env_value, dev_mode_active):
@@ -61,6 +84,10 @@ def resolve_secret_key(env_value, dev_mode_active):
 
 
 app.secret_key = resolve_secret_key(os.environ.get("SECRET_KEY"), auth.dev_login_enabled())
+app.config["IDLE_TIMEOUT_MINUTES"] = resolve_idle_timeout_minutes(
+    os.environ.get("IDLE_TIMEOUT_MINUTES")
+)
+app.config["IDLE_TIMEOUT_SECONDS"] = app.config["IDLE_TIMEOUT_MINUTES"] * 60
 
 # Batch 10 Part 26: session cookie hardening. SECURE is conditional on production
 # posture only — forcing it on in local dev (plain http://) would silently break
@@ -734,6 +761,12 @@ def inject_globals():
         "can_view_bank_accounts": can_view_bank_accounts(),
         "can_edit_bank_accounts": can_edit_bank_accounts(),
         "properties": _get_properties_safe(),
+        "idle_timeout_enabled": bool(roles),
+        "idle_timeout_minutes": app.config["IDLE_TIMEOUT_MINUTES"],
+        "idle_timeout_seconds": app.config["IDLE_TIMEOUT_SECONDS"],
+        "last_verified_activity_ms": int(
+            session.get(SESSION_LAST_ACTIVITY_KEY, _now_timestamp()) * 1000
+        ),
     }
 
 
@@ -755,7 +788,52 @@ def _get_properties_safe():
 
 
 # [AUTH] Development role gate — replace with Azure AD / MSAL authentication
-ROLE_FREE_ENDPOINTS = {"role_select", "switch_role", "dev_set_acting_as_user", "logout", "static"}
+ROLE_FREE_ENDPOINTS = {
+    "role_select", "switch_role", "dev_set_acting_as_user", "logout",
+    "session_timeout", "static",
+}
+JSON_ENDPOINTS = {"session_activity", "bank_account_reveal", "request_reveal_banking", "admin_database_test"}
+
+
+def _request_expects_json():
+    return (
+        request.path.startswith("/api/")
+        or request.endpoint in JSON_ENDPOINTS
+        or request.is_json
+        or request.accept_mimetypes.best == "application/json"
+    )
+
+
+def _expire_easy_auth_cookie(response):
+    response.delete_cookie(
+        EASY_AUTH_SESSION_COOKIE,
+        path="/",
+        secure=True,
+        httponly=True,
+        samesite="Lax",
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _render_session_timeout_page():
+    template = app.jinja_env.get_template("session_timeout.html")
+    return template.render(idle_timeout_minutes=app.config["IDLE_TIMEOUT_MINUTES"])
+
+
+def _idle_timeout_response():
+    session.clear()
+    if _request_expects_json():
+        response = jsonify({
+            "success": False,
+            "session_expired": True,
+            "reason": "Your application session expired due to inactivity.",
+        })
+        response.status_code = 401
+        return _expire_easy_auth_cookie(response)
+    response = app.make_response(_render_session_timeout_page())
+    response.status_code = 401
+    return _expire_easy_auth_cookie(response)
 
 @app.before_request
 def require_role():
@@ -791,21 +869,47 @@ def require_role():
     # validated non-empty above).
     if not current_roles():
         return redirect(url_for("role_select"))
+
+    now = _now_timestamp()
+    last_activity = session.get(SESSION_LAST_ACTIVITY_KEY)
+    if last_activity is None:
+        session[SESSION_LAST_ACTIVITY_KEY] = now
+    elif now - float(last_activity) >= app.config["IDLE_TIMEOUT_SECONDS"]:
+        return _idle_timeout_response()
     return None
+
+
+@app.route("/api/session/activity", methods=["POST"])
+def session_activity():
+    """Record browser-verified user activity without treating other requests as activity."""
+    now = _now_timestamp()
+    last_activity = float(session.get(SESSION_LAST_ACTIVITY_KEY, 0))
+    if now - last_activity >= ACTIVITY_UPDATE_MIN_SECONDS:
+        session[SESSION_LAST_ACTIVITY_KEY] = now
+    return jsonify({"success": True, "last_activity_ms": int(now * 1000)})
+
+
+@app.route("/session-timeout")
+def session_timeout():
+    """Clear local app state and only this app's Easy Auth session cookie."""
+    session.clear()
+    response = app.make_response(_render_session_timeout_page())
+    return _expire_easy_auth_cookie(response)
 
 
 @app.route("/logout")
 def logout():
     """
-    Production (Easy Auth): defers to Azure App Service's built-in logout
-    endpoint, which clears the Easy Auth session cookie server-side — this app
-    has no session of its own to clear in that case. Local dev: clears the
-    role-switcher/Acting-As session state and returns to the picker.
+    Clear this application's Flask and Easy Auth sessions without invoking
+    /.auth/logout, which can sign the browser out of other Microsoft apps.
+    Local dev returns to the role picker; production starts a fresh Easy Auth
+    login flow and returns to this application.
     """
     is_easy_auth = auth.current_identity()["source"] == "easy_auth"
     session.clear()
     if is_easy_auth:
-        return redirect("/.auth/logout?post_logout_redirect_uri=/")
+        response = redirect("/.auth/login/aad?post_login_redirect_uri=%2F")
+        return _expire_easy_auth_cookie(response)
     return redirect(url_for("role_select"))
 
 

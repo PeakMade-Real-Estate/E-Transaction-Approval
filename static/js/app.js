@@ -7,6 +7,90 @@
 
 'use strict';
 
+// ── Verified User Idle Timeout ───────────────────────────────
+function initializeIdleTimeout() {
+    const body = document.body;
+    if (body.dataset.idleTimeoutEnabled !== 'true') return;
+    const timeoutSeconds = Number(body.dataset.idleTimeoutSeconds || 0);
+    const activityUrl = body.dataset.sessionActivityUrl;
+    const timeoutUrl = body.dataset.sessionTimeoutUrl;
+    const serverActivityMs = Number(body.dataset.lastVerifiedActivityMs || 0);
+    if (!timeoutSeconds || !activityUrl || !timeoutUrl) return;
+
+    const storageKey = 'etransaction:lastUserActivityMs';
+    const timeoutMs = timeoutSeconds * 1000;
+    const serverUpdateIntervalMs = 30 * 1000;
+    function readStoredActivity() {
+        try {
+            const value = Number(localStorage.getItem(storageKey) || 0);
+            return Number.isFinite(value) ? value : 0;
+        } catch (error) {
+            return 0;
+        }
+    }
+
+    let lastUserActivityMs = Math.max(serverActivityMs, readStoredActivity());
+    let lastServerUpdateMs = serverActivityMs;
+    let lastBrowserRecordMs = 0;
+    let expirationStarted = false;
+
+    function expireSession() {
+        if (expirationStarted) return;
+        expirationStarted = true;
+        window.location.replace(timeoutUrl);
+    }
+
+    async function notifyServer(activityMs) {
+        if (activityMs - lastServerUpdateMs < serverUpdateIntervalMs) return;
+        lastServerUpdateMs = activityMs;
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+            const response = await fetch(activityUrl, {
+                method: 'POST',
+                credentials: 'same-origin',
+                headers: { 'X-CSRFToken': csrfToken },
+                cache: 'no-store',
+                keepalive: true,
+            });
+            if (response.status === 401) expireSession();
+        } catch (error) {
+            // A transient network failure must not manufacture user activity.
+        }
+    }
+
+    function recordUserActivity(event) {
+        if (expirationStarted || !event.isTrusted) return;
+        const now = Date.now();
+        if (now - lastUserActivityMs >= timeoutMs) {
+            expireSession();
+            return;
+        }
+        if (now - lastBrowserRecordMs < 1000) return;
+        lastBrowserRecordMs = now;
+        lastUserActivityMs = now;
+        try { localStorage.setItem(storageKey, String(now)); } catch (error) { /* storage unavailable */ }
+        notifyServer(now);
+    }
+
+    ['pointerdown', 'pointermove', 'keydown', 'click', 'touchstart', 'scroll'].forEach(eventName => {
+        window.addEventListener(eventName, recordUserActivity, { passive: true });
+    });
+
+    window.addEventListener('storage', event => {
+        if (event.key !== storageKey || !event.newValue) return;
+        const sharedActivityMs = Number(event.newValue);
+        if (Number.isFinite(sharedActivityMs) && sharedActivityMs > lastUserActivityMs) {
+            lastUserActivityMs = sharedActivityMs;
+        }
+    });
+
+    window.setInterval(() => {
+        const sharedActivityMs = readStoredActivity();
+        if (sharedActivityMs > lastUserActivityMs) lastUserActivityMs = sharedActivityMs;
+        if (Date.now() - lastUserActivityMs >= timeoutMs) expireSession();
+    }, 1000);
+}
+
 // ── Request Type Helper Text ──────────────────────────────────
 const REQUEST_TYPE_HELP = {
     'Wire':                'Same-day transaction if released prior to the bank cutoff time.',
@@ -202,6 +286,8 @@ function clearFilters() {
 
 // ── Initialize ────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', function () {
+
+    initializeIdleTimeout();
 
     // Intake form wiring
     const reqType = document.getElementById('request_type');
