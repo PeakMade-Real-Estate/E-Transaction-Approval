@@ -34,6 +34,7 @@ folder-creation call is required before uploading.
 
 import os
 import uuid
+from datetime import datetime, timezone
 
 import msal
 import requests
@@ -285,6 +286,50 @@ def _set_item_fields(drive_id: str, item_id: str, fields: dict) -> None:
     )
 
 
+# Team-shared "Innovation Use Log" list (SHAREPOINT_LOG_LIST_ID, same site as
+# everything else here) is written to by multiple apps, not just this one.
+# Its ActivityType column is a STRICT choice column (allowTextEntry=False) —
+# confirmed live via GET .../lists/{id}/columns — only "Login"/"Logout"
+# (and lowercase variants) are accepted; any other value is rejected by Graph.
+LOG_ACTIVITY_LOGIN  = "Login"
+LOG_ACTIVITY_LOGOUT = "Logout"
+_ALLOWED_LOG_ACTIVITY_TYPES = {LOG_ACTIVITY_LOGIN, LOG_ACTIVITY_LOGOUT}
+LOG_APPLICATION_NAME = "E-Transaction Approval Dashboard"
+
+
+def log_activity(*, activity_type, user_email, user_name, user_role):
+    """
+    Write one row to the team-shared Innovation Use Log list for a Login/Logout
+    event. Raises ValueError for any activity_type other than the two the live
+    column actually accepts — callers must not silently coerce/guess.
+    """
+    if activity_type not in _ALLOWED_LOG_ACTIVITY_TYPES:
+        raise ValueError(f"Unsupported log activity_type: {activity_type!r}")
+
+    list_id = os.environ.get("SHAREPOINT_LOG_LIST_ID", "")
+    if not list_id:
+        raise RuntimeError("SHAREPOINT_LOG_LIST_ID must be set in .env before logging activity.")
+    site_id = get_site_id()
+
+    env_label = "Development" if os.environ.get("DEV_LOGIN_ENABLED", "true").lower() == "true" else "Production"
+    fields = {
+        "Title":           user_email,
+        "UserEmail":       user_email,
+        "UserName":        user_name,
+        "LoginTimestamp":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "UserRole":        user_role,
+        "ActivityType":    activity_type,
+        "Application":     LOG_APPLICATION_NAME,
+        "Env":             env_label,
+    }
+    _graph_request(
+        "POST",
+        f"{GRAPH_BASE}/sites/{site_id}/lists/{list_id}/items",
+        headers={"Content-Type": "application/json"},
+        json={"fields": fields},
+    )
+
+
 def upload_attachment(request_id, file_storage, *, section, doc_type, uploaded_by_role,
                        transaction_key=None, description="", is_required=False,
                        source_system="E-Transaction App"):
@@ -299,7 +344,13 @@ def upload_attachment(request_id, file_storage, *, section, doc_type, uploaded_b
     if not content:
         return None
 
-    item = _upload_bytes(request_id, file_storage.filename, content)
+    # Physical storage name is prefixed with doc_type so uploading the SAME
+    # original filename to different attachment slots on one request (e.g. the
+    # same photo for Validation Evidence AND Payment Support) never overwrites
+    # a sibling upload at the same path — FIELD_ORIGINAL_NAME (below) is always
+    # the source of truth for what's shown to the user, never this blob name.
+    storage_filename = f"{_sanitize_filename(doc_type)} - {file_storage.filename}"
+    item = _upload_bytes(request_id, storage_filename, content)
 
     correlation_id = str(uuid.uuid4())
     fields = {
@@ -348,7 +399,8 @@ def list_attachments(request_id):
             continue
         fields = item.get("listItem", {}).get("fields", {})
         results.append({
-            "filename":         item.get("name", ""),
+            "filename":          item.get("name", ""),
+            "original_filename": fields.get(FIELD_ORIGINAL_NAME, "") or item.get("name", ""),
             "web_url":          item.get("webUrl", ""),
             "section":          fields.get(FIELD_SECTION, ""),
             "doc_type":         fields.get(FIELD_DOC_TYPE, ""),

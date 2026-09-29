@@ -804,6 +804,34 @@ def _request_expects_json():
     )
 
 
+def _log_login_logout_activity(activity_type):
+    """
+    Best-effort Login/Logout entry to the team-shared Innovation Use Log
+    (SharePoint) — never blocks the real login/logout/timeout flow on a
+    logging failure, and never touches Fabric SQL (identity comes from Easy
+    Auth headers / dev session, with current_app_user() only as a richer
+    best-effort fallback). Call BEFORE session.clear() — dev-mode identity
+    resolution depends on session state that's about to be wiped.
+    """
+    if not sharepoint_enabled():
+        return
+    try:
+        identity = auth.current_identity()
+        app_user = current_app_user()
+        user_email = (app_user or {}).get("email") or identity.get("display_name", "")
+        user_name  = (app_user or {}).get("display_name") or identity.get("display_name", "")
+        if not user_email:
+            return
+        sharepoint.log_activity(
+            activity_type=activity_type,
+            user_email=user_email,
+            user_name=user_name,
+            user_role=current_roles_display(),
+        )
+    except Exception:
+        app.logger.exception("Unable to record %s activity log entry", activity_type)
+
+
 def _expire_easy_auth_cookie(response):
     response.delete_cookie(
         EASY_AUTH_SESSION_COOKIE,
@@ -822,6 +850,7 @@ def _render_session_timeout_page():
 
 
 def _idle_timeout_response():
+    _log_login_logout_activity(sharepoint.LOG_ACTIVITY_LOGOUT)
     session.clear()
     if _request_expects_json():
         response = jsonify({
@@ -874,6 +903,7 @@ def require_role():
     last_activity = session.get(SESSION_LAST_ACTIVITY_KEY)
     if last_activity is None:
         session[SESSION_LAST_ACTIVITY_KEY] = now
+        _log_login_logout_activity(sharepoint.LOG_ACTIVITY_LOGIN)
     elif now - float(last_activity) >= app.config["IDLE_TIMEOUT_SECONDS"]:
         return _idle_timeout_response()
     return None
@@ -892,6 +922,7 @@ def session_activity():
 @app.route("/session-timeout")
 def session_timeout():
     """Clear local app state and only this app's Easy Auth session cookie."""
+    _log_login_logout_activity(sharepoint.LOG_ACTIVITY_LOGOUT)
     session.clear()
     response = app.make_response(_render_session_timeout_page())
     return _expire_easy_auth_cookie(response)
@@ -906,6 +937,7 @@ def logout():
     login flow and returns to this application.
     """
     is_easy_auth = auth.current_identity()["source"] == "easy_auth"
+    _log_login_logout_activity(sharepoint.LOG_ACTIVITY_LOGOUT)
     session.clear()
     if is_easy_auth:
         response = redirect("/.auth/login/aad?post_login_redirect_uri=%2F")
@@ -1231,7 +1263,7 @@ def intake_draft_edit(transaction_key):
             for item in sharepoint.list_attachments(draft["request_id"]):
                 key = sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item["doc_type"])
                 if key:
-                    existing_attachments[key] = item["filename"]
+                    existing_attachments[key] = item.get("original_filename") or item.get("filename", "")
         except Exception:
             app.logger.exception("Unable to load existing draft attachments for %s", draft["request_id"])
     return render_template(
@@ -2235,7 +2267,7 @@ def request_detail(request_id):
         for item in sp_items:
             key = sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item["doc_type"])
             if key:
-                attachments[key]     = item["filename"]
+                attachments[key]     = item.get("original_filename") or item.get("filename", "")
                 attachment_urls[key] = item["web_url"]
                 continue
             evidence_key = sharepoint.DOC_TYPE_TO_EVIDENCE_KEY.get(item["doc_type"])
@@ -2244,14 +2276,14 @@ def request_detail(request_id):
                 # (request_detail.html "Treasury Processing / Release Evidence")
                 # rather than falling into the generic Additional Attachments list.
                 treasury_evidence[evidence_key] = {
-                    "filename":    item["filename"],
+                    "filename":    item.get("original_filename") or item.get("filename", ""),
                     "web_url":     item["web_url"],
                     "uploaded_by": item.get("uploaded_by_role", ""),
                     "date":        item.get("uploaded_date", "")[:10],
                 }
                 continue
             extra_attachments.append({
-                "filename":    item["filename"],
+                "filename":    item.get("original_filename") or item.get("filename", ""),
                 "description": item.get("description", ""),
                 "uploaded_by": item.get("uploaded_by_role", ""),
                 "date":        item.get("uploaded_date", "")[:10],
