@@ -60,6 +60,12 @@
                     </a>
                 </li>
                 {% endif %}
+                <li class="nav-item">
+                    <a class="nav-link px-3 {% if request.endpoint == 'user_directory' %}active fw-semibold{% endif %}"
+                       href="{{ url_for('user_directory') }}">
+                        <i class="fas fa-address-book me-1"></i> User Directory
+                    </a>
+                </li>
                 <!-- [AUTH] Identity source: Easy Auth in Azure, local dev role switcher otherwise -->
                 <li class="nav-item ms-3 pe-1">
                     <span class="nav-link py-0 d-flex align-items-center gap-2"

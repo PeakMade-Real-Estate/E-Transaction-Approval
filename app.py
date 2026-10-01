@@ -1987,6 +1987,21 @@ def export_dashboard():
     )
 
 
+@app.route("/user-directory")
+def user_directory():
+    """User directory reference page (name/team/phone) — open to any signed-in, role-holding user."""
+    if not database_enabled():
+        flash("The user directory requires the SQL data source and is not available for mock/session data.", "warning")
+        return redirect(url_for("dashboard"))
+    try:
+        users = db.get_user_directory()
+    except Exception:
+        app.logger.exception("Unable to load user directory")
+        users = []
+        flash("Unable to load the user directory right now.", "danger")
+    return render_template("user_directory.html", users=users)
+
+
 @app.route("/bank-accounts")
 def bank_accounts():
     """Bank Account Management dashboard."""

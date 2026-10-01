@@ -1101,6 +1101,30 @@ def get_user_list():
         conn.close()
 
 
+def get_user_directory():
+    """
+    Return active AppUsers (name/team/phone/email) for the user directory
+    reference page. Restricted to rows with a Team value — the business
+    roster (Team/Phone_Number) is only populated for real users, so this
+    naturally excludes internal dev/test AppUser rows (Patrick Batson,
+    Test Approver/Controller/VP/CFO/Treasury) without hardcoding their names.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Display_Name, Team, Phone_Number, Email FROM [etransactions].[AppUser] "
+            "WHERE Active_Status = 1 AND Team IS NOT NULL AND Team <> '' "
+            "ORDER BY Team, Display_Name"
+        )
+        return [
+            {"display_name": r[0], "team": r[1], "phone_number": r[2] or "", "email": r[3]}
+            for r in cur.fetchall()
+        ]
+    finally:
+        conn.close()
+
+
 def get_bank_account_status(bank_account_key: int):
     """
     Return the raw Status ('Open'/'Active'/'Closed') of a BankAccount, or None

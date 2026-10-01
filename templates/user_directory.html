@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}User Directory — E-Transaction Approval Dashboard{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
+    <div>
+        <h2 class="mb-1 fw-bold">
+            <i class="fas fa-address-book me-2 text-primary"></i>User Directory
+        </h2>
+        <p class="text-muted mb-0 small">Name, team, and phone number for E-Transaction Approval users.</p>
+    </div>
+</div>
+
+<div class="card shadow-sm">
+    <div class="card-body p-0">
+        <div class="table-responsive">
+            <table class="table table-hover align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Name</th>
+                        <th>Team</th>
+                        <th>Phone</th>
+                        <th>Email</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for user in users %}
+                    <tr>
+                        <td>{{ user.display_name }}</td>
+                        <td>{{ user.team }}</td>
+                        <td>{{ user.phone_number }}</td>
+                        <td>{{ user.email }}</td>
+                    </tr>
+                    {% else %}
+                    <tr>
+                        <td colspan="4" class="text-center text-muted py-4">No directory entries found.</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% endblock %}
