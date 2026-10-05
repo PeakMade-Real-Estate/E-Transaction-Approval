@@ -82,11 +82,13 @@
 .tier-card-controller { border-left: 5px solid #0d6efd; }
 .tier-card-vp         { border-left: 5px solid #fd7e14; }
 .tier-card-cfo        { border-left: 5px solid #dc3545; }
+.tier-card-treasury   { border-left: 5px solid #20c997; }
 
 .tier-badge-sam        { background-color: #198754 !important; color: #fff; }
 .tier-badge-controller { background-color: #0d6efd !important; color: #fff; }
 .tier-badge-vp         { background-color: #fd7e14 !important; color: #fff; }
 .tier-badge-cfo        { background-color: #dc3545 !important; color: #fff; }
+.tier-badge-treasury   { background-color: #20c997 !important; color: #fff; }
 
 /* ── CFO / High-Value Warning ───────────────────────────────── */
 .cfo-warning {

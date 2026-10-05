@@ -102,6 +102,9 @@
                         <div>
                             {% if record.last_used_date %}
                             {{ record.last_used_date }}
+                            {% if record.prior_request_id %}
+                            <div class="text-muted small">Prior Transaction: {{ record.prior_request_id }}</div>
+                            {% endif %}
                             {% else %}
                             <span class="text-warning fw-semibold">
                                 <i class="fas fa-exclamation-triangle me-1"></i>Never used (new instructions)
@@ -130,6 +133,19 @@
             </div>
             <div class="card-body small">
                 <div class="row g-2">
+                    {% set prior_use_validated = record.instructions_previously_used and record.prior_request_id %}
+                    {% if prior_use_validated %}
+                    <div class="col-12">
+                        <div class="alert alert-success py-2 px-3 mb-2 small d-flex align-items-center gap-2">
+                            <i class="fas fa-check-circle"></i>
+                            <div>
+                                <strong>Previously Used Instructions</strong> — matched prior completed transaction
+                                {{ record.prior_request_id }} ({{ record.last_used_date }}). Re-verification: Not required —
+                                exact prior validated instructions matched.
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
                     {% macro check_item(value, label) %}
                     <div class="col-12">
                         <div class="d-flex align-items-center gap-2">
@@ -186,6 +202,8 @@
                                             {% if record.avs_score | int < 90 %}
                                             <span class="badge bg-warning text-dark ms-1">Below 90</span>
                                             {% endif %}
+                                        {% elif prior_use_validated %}
+                                            <span class="text-muted">Not required — prior use validated</span>
                                         {% else %}
                                             <span class="text-muted">Not entered</span>
                                         {% endif %}
@@ -201,6 +219,8 @@
                                         {% if docs.get('wf_avs_screenshot') %}
                                         <i class="fas fa-check-circle text-success me-1"></i>
                                         <span class="text-success fw-semibold">Attached</span>
+                                        {% elif prior_use_validated %}
+                                        <span class="text-muted">Not required</span>
                                         {% else %}
                                         <span class="badge bg-warning text-dark">Not attached</span>
                                         {% endif %}
@@ -217,6 +237,8 @@
                                         {% else %}
                                         <span class="text-success fw-semibold">{{ attachments.validation_evidence }}</span>
                                         {% endif %}
+                                        {% elif prior_use_validated %}
+                                        <span class="text-muted">Not required</span>
                                         {% else %}
                                         <span class="badge bg-warning text-dark">Not attached</span>
                                         {% endif %}

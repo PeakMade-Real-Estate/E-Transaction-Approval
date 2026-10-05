@@ -77,6 +77,20 @@ ACTION_MARK_COMPLETED     = "mark_completed"        # Corporate: Treasury confir
 ACTION_REASSIGN           = "reassign"               # Admin/Treasury/Controller reassigns Approver or Controller — also the WorkflowEvent.Event_Type written
 
 PROPERTY_CLASSIFICATION = "property"
+CORPORATE_CLASSIFICATION = "corporate"
+
+# AppUser.Team values eligible as Approver/Controller candidates for each
+# classification (intake form + reassignment candidate lists). An AppUser
+# with no Team on file is never excluded by this mapping — see
+# db.get_reassignment_candidates().
+TEAM_PROPERTY  = "PA"
+TEAM_CORPORATE = "CA"
+
+
+def team_for_classification(entity_classification: str) -> str:
+    """Return the AppUser.Team value whose members are eligible Approver/Controller
+    candidates for the given Property/Corporate classification."""
+    return TEAM_PROPERTY if is_property_transaction(entity_classification) else TEAM_CORPORATE
 
 # ── WorkflowEvent.Event_Type contract (Batch 6, compatibility-corrected) ──
 # Power Automate is already built around the pre-existing literals below, so
@@ -263,7 +277,7 @@ def same_person_approver_controller(txn: dict) -> bool:
     return approver is not None and approver == controller
 
 
-def approval_tier_label(*, requires_vp: bool, requires_cfo: bool) -> str:
+def approval_tier_label(*, requires_vp: bool, requires_cfo: bool, entity_classification: str = None) -> str:
     """
     Display-only "Required Approval Tier" text derived purely from the resolved
     ApprovalRule's own Requires_VP/Requires_CFO booleans (Batch 7) — never from
@@ -271,11 +285,18 @@ def approval_tier_label(*, requires_vp: bool, requires_cfo: bool) -> str:
     (pre-Batch-7: $250k-$500k) into this same base label, since that band never
     actually required a different approval than the base tier — a deliberate
     simplification, not a routing change.
+
+    Corporate has no Senior Accounting Manager / Assistant Controller titles
+    (confirmed business feedback) — its base tier (no VP/CFO required) reads
+    "Treasury Manager" instead. VP/CFO tiers are unaffected and apply the same
+    to both classifications.
     """
     if requires_cfo:
         return "Vice President + CFO"
     if requires_vp:
         return "Vice President"
+    if entity_classification is not None and not is_property_transaction(entity_classification):
+        return "Treasury Manager"
     return "Senior Accounting Manager / Assistant Controller"
 
 

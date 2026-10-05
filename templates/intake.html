@@ -44,7 +44,7 @@
         <form method="POST" action="{{ url_for('intake_submit') }}"
               enctype="multipart/form-data" id="intake-form" novalidate>
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" name="transaction_key" value="{{ draft.transaction_key if draft else '' }}">
+            <input type="hidden" id="transaction_key" name="transaction_key" value="{{ draft.transaction_key if draft else '' }}">
             <input type="hidden" name="request_id" value="{{ draft.request_id if draft else '' }}">
 
             {% if draft %}
@@ -109,6 +109,8 @@
                                     <label class="form-label fw-semibold mb-1" for="last_used_date">Last Date Used <span class="text-danger">*</span></label>
                                     <input type="date" class="form-control" id="last_used_date" name="last_used_date" value="{{ request.form.get('last_used_date', '') }}">
                                 </div>
+                                <input type="hidden" id="prior_use_ack" name="prior_use_ack" value="{{ request.form.get('prior_use_ack', '') }}">
+                                <div id="prior-use-match-panel" style="display:none;"></div>
                                 <div id="new-instructions-notice"
                                      class="alert alert-warning py-2 px-3 mt-2 small">
                                     <i class="fas fa-exclamation-triangle me-1"></i>
@@ -247,9 +249,10 @@
                                 <select class="form-select" id="approver" name="approver_key" required>
                                     <option value="">&#8212; Select Approver &#8212;</option>
                                     {% for u in approver_users %}
-                                    <option value="{{ u.user_key }}" {% if draft and draft.approver_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if draft and draft.approver_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
+                                <div class="form-text">Choose Property or Corporate above to narrow this list.</div>
                                 {% else %}
                                 <input type="text" class="form-control" id="approver"
                                        name="approver" placeholder="Approver's full name" required>
@@ -265,9 +268,10 @@
                                 <select class="form-select" id="controller" name="controller_key" required>
                                     <option value="">&#8212; Select Controller &#8212;</option>
                                     {% for u in controller_users %}
-                                    <option value="{{ u.user_key }}" {% if draft and draft.controller_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if draft and draft.controller_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
+                                <div class="form-text">Choose Property or Corporate above to narrow this list.</div>
                                 {% else %}
                                 <input type="text" class="form-control" id="controller"
                                        name="controller" placeholder="Controller's full name" required>
@@ -894,6 +898,25 @@
         if (deptField)      deptField.required      = !!corporateChecked;
         if (propertyChecked && deptField) deptField.value = '';
         if (corporateChecked && propertySelect) propertySelect.value = '';
+
+        // ── Approver/Controller → restrict candidates to the matching Team ──
+        // 'PA' for Property, 'CA' for Corporate — an option with no data-team
+        // (e.g. a local-dev test fixture) is always left eligible.
+        const requiredTeam = corporateChecked ? 'CA' : (propertyChecked ? 'PA' : null);
+        ['approver', 'controller'].forEach(id => {
+            const select = document.getElementById(id);
+            if (!select || select.tagName !== 'SELECT') return;
+            Array.from(select.options).forEach(opt => {
+                if (!opt.value) return;  // keep the placeholder option visible
+                const team = opt.dataset.team || '';
+                const eligible = !requiredTeam || !team || team === requiredTeam;
+                opt.hidden = !eligible;
+                opt.disabled = !eligible;
+            });
+            if (select.selectedOptions[0] && select.selectedOptions[0].hidden) select.value = '';
+        });
+
+        if (typeof onAmountChange === 'function') onAmountChange();  // base tier label depends on classification too
     }
     document.querySelectorAll('input[name="classification"]').forEach(el => el.addEventListener('change', onClassificationChange));
     onClassificationChange();  // reflect a resumed Draft's stored classification on load
@@ -922,6 +945,106 @@
         if (notice)  notice.style.display  = checked ? 'none'  : 'block';
         if (dateIn)  dateIn.required       = checked;
         if (!checked && dateIn) dateIn.value = '';
+        schedulePriorUseCheck();
+    }
+
+    // ── Previously Used Instructions → server-backed prior-use precheck ──
+    // Shows the matched prior Request ID / system-derived last-used date and
+    // requires an explicit acknowledgment — WITHOUT navigating away, so the
+    // already-selected required attachment files are never lost (INT-017).
+    let priorUseCheckTimer = null;
+    let priorUseMatchedRequestId = null;
+
+    function clearPriorUseAcknowledgment() {
+        const ackInput = document.getElementById('prior_use_ack');
+        if (ackInput) ackInput.value = '';
+        priorUseMatchedRequestId = null;
+    }
+
+    function renderPriorUseMatchPanel(state, data) {
+        const panel = document.getElementById('prior-use-match-panel');
+        if (!panel) return;
+        if (state === 'matched') {
+            panel.style.display = 'block';
+            panel.innerHTML =
+                '<div class="alert alert-success py-2 px-3 mt-2 mb-1 small">' +
+                '<i class="fas fa-check-circle me-1"></i>' +
+                'Matches previously validated beneficiary banking instructions on completed transaction ' +
+                '<strong>' + data.request_id + '</strong>, last used <strong>' + data.last_used_date + '</strong>.' +
+                '</div>' +
+                '<div class="form-check mt-1">' +
+                '<input class="form-check-input" type="checkbox" id="prior_use_acknowledge">' +
+                '<label class="form-check-label small" for="prior_use_acknowledge">' +
+                'I have reviewed the prior transaction and confirm these are the same beneficiary banking instructions.' +
+                '</label></div>';
+            priorUseMatchedRequestId = data.request_id;
+            const ackInput = document.getElementById('prior_use_ack');
+            const wasAcked = ackInput && ackInput.value === data.request_id;
+            const ackCb = document.getElementById('prior_use_acknowledge');
+            ackCb.checked = wasAcked;
+            ackCb.addEventListener('change', function () {
+                if (ackInput) ackInput.value = ackCb.checked ? priorUseMatchedRequestId : '';
+            });
+        } else if (state === 'unmatched') {
+            panel.style.display = 'block';
+            panel.innerHTML =
+                '<div class="alert alert-warning py-2 px-3 mt-2 mb-0 small">' +
+                '<i class="fas fa-exclamation-triangle me-1"></i>' +
+                'These receiving banking instructions could not be verified as previously used and completed. ' +
+                'Follow the new/unverified instructions process (verbal confirmation with a known contact) instead.' +
+                '</div>';
+            clearPriorUseAcknowledgment();
+        } else {
+            panel.style.display = 'none';
+            panel.innerHTML = '';
+            clearPriorUseAcknowledgment();
+        }
+    }
+
+    async function checkPriorUseMatch() {
+        const cb = document.getElementById('instructions_previously_used');
+        if (!cb || !cb.checked) { renderPriorUseMatchPanel('hidden'); return; }
+        const payee  = (document.getElementById('recv_payee_name')?.value || '').trim();
+        const bank   = (document.getElementById('recv_bank_name')?.value || '').trim();
+        const acct   = (document.getElementById('recv_account_number')?.value || '').trim();
+        const route  = (document.getElementById('recv_routing_number')?.value || '').trim();
+        const txnKey = document.getElementById('transaction_key')?.value || '';
+        // A brand-new (non-Draft) submission needs real account/routing text;
+        // a Draft may leave them blank to mean "keep the stored value" — the
+        // server resolves that case itself from the real stored value.
+        if (!payee || !bank || (!txnKey && (!acct || !route))) {
+            renderPriorUseMatchPanel('hidden');
+            return;
+        }
+        const panel = document.getElementById('prior-use-match-panel');
+        if (panel) {
+            panel.style.display = 'block';
+            panel.innerHTML = '<div class="text-muted small mt-2"><i class="fas fa-spinner fa-spin me-1"></i>Checking prior use…</div>';
+        }
+        try {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+            const body = new URLSearchParams({
+                recv_payee_name: payee, recv_bank_name: bank,
+                recv_account_number: acct, recv_routing_number: route,
+                transaction_key: txnKey,
+            });
+            const resp = await fetch('{{ url_for("intake_prior_use_check") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken },
+                body: body.toString(),
+            });
+            const data = await resp.json();
+            if (!data.success) { renderPriorUseMatchPanel('hidden'); return; }
+            renderPriorUseMatchPanel(data.matched ? 'matched' : 'unmatched', data);
+        } catch (e) {
+            renderPriorUseMatchPanel('hidden');
+        }
+    }
+
+    function schedulePriorUseCheck() {
+        clearPriorUseAcknowledgment();
+        if (priorUseCheckTimer) clearTimeout(priorUseCheckTimer);
+        priorUseCheckTimer = setTimeout(checkPriorUseMatch, 500);
     }
 
     // ── AVS Score → Low-score warning ────────────────────────────
@@ -990,6 +1113,12 @@
         if (paySup && !paySup.files.length)
             errors.push({ msg: '<strong>Payment Support</strong> documentation must be attached.', section: 'sectionE' });
 
+        // Section A — Previously Used must be acknowledged against the matched prior transaction
+        const prevUsedCb = document.getElementById('instructions_previously_used');
+        if (prevUsedCb && prevUsedCb.checked && !document.getElementById('prior_use_ack')?.value) {
+            errors.push({ msg: 'Please review and confirm the matched prior transaction before submitting.', section: 'sectionA' });
+        }
+
         if (!errors.length) return true;
         e.preventDefault();
 
@@ -1041,6 +1170,13 @@
             prevUsedCb.addEventListener('change', onInstructionsPreviouslyUsedChange);
             onInstructionsPreviouslyUsedChange();
         }
+
+        // Changing WHAT was previously used invalidates any prior acknowledgment
+        // and re-triggers the server-backed precheck (INT-017).
+        ['recv_payee_name', 'recv_bank_name', 'recv_account_number', 'recv_routing_number'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('input', schedulePriorUseCheck);
+        });
 
         // Wire type → address required
         const reqTypeEl = document.getElementById('request_type');

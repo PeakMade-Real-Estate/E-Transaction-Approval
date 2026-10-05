@@ -101,10 +101,14 @@ const REQUEST_TYPE_HELP = {
 };
 
 // ── Approval Tier Logic ───────────────────────────────────────
-function getApprovalTier(amount) {
+// Corporate has no Senior Accounting Manager / Assistant Controller titles
+// (confirmed business feedback) — its base tier (no VP/CFO) is Treasury
+// Manager instead. VP/CFO tiers are the same for both classifications.
+function getApprovalTier(amount, classification) {
     if (amount >= 1_000_000) return { tier: 'Vice President + CFO',                              level: 'cfo',        icon: 'fa-star',       color: 'danger'  };
     if (amount >= 500_000)   return { tier: 'Vice President',                                    level: 'vp',         icon: 'fa-user-tie',   color: 'warning' };
     if (amount >= 250_000)   return { tier: 'Controller',                                        level: 'controller', icon: 'fa-user-check', color: 'primary' };
+    if (classification === 'corporate') return { tier: 'Treasury Manager',                       level: 'treasury',   icon: 'fa-vault',      color: 'success' };
     return { tier: 'Senior Accounting Manager / Assistant Controller',                           level: 'sam',        icon: 'fa-user',       color: 'success' };
 }
 
@@ -148,7 +152,8 @@ function onAmountChange() {
     const amountInput = document.getElementById('amount');
     if (!amountInput) return;
     const amount = parseFloat(amountInput.value) || 0;
-    const info = getApprovalTier(amount);
+    const classification = document.querySelector('input[name="classification"]:checked')?.value || '';
+    const info = getApprovalTier(amount, classification);
 
     // ── Inline tier card (visible on all screen sizes) ──
     const inlineTierCard = document.getElementById('approval-tier-card');
@@ -194,7 +199,7 @@ function onAmountChange() {
     if (execNotice)  execNotice.style.display  = amount >= 1_000_000 ? 'inline' : 'none';
 
     // ── Tier guidance table row highlight ──
-    ['sam', 'controller', 'vp', 'cfo'].forEach(level => {
+    ['sam', 'controller', 'vp', 'cfo', 'treasury'].forEach(level => {
         const row = document.getElementById('tier-row-' + level);
         if (row) {
             row.classList.remove('table-active', 'fw-bold', 'table-warning');
@@ -306,6 +311,10 @@ document.addEventListener('DOMContentLoaded', function () {
         amountEl.addEventListener('input', onAmountChange);
         onAmountChange();
     }
+
+    document.querySelectorAll('input[name="classification"]').forEach(r => {
+        r.addEventListener('change', onAmountChange);  // Corporate base tier reads "Treasury Manager"
+    });
 
     const lastUsedEl = document.getElementById('last_used_date');
     if (lastUsedEl) {

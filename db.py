@@ -487,24 +487,36 @@ def add_transaction_comment(transaction_key, *, author_user_key, comment_type, c
         conn.close()
 
 
-def get_reassignment_candidates(role_code: str):
+def get_reassignment_candidates(role_code: str, team: str = None):
     """
     Return active AppUsers holding `role_code` in AppUserRole, for the
     reassignment replacement dropdown (e.g. role_code='sam' for Approver,
-    'controller' for Controller — see workflow.REASSIGNMENT_STAGE_MAP).
+    'controller' for Controller — see workflow.REASSIGNMENT_STAGE_MAP) and for
+    the intake form's Approver/Controller candidate lists.
+
+    When `team` is given (e.g. workflow.TEAM_PROPERTY/TEAM_CORPORATE), rows
+    are restricted to that AppUser.Team OR a blank/NULL Team — an AppUser
+    with no Team on file (e.g. local dev/test fixtures) is never excluded by
+    the team filter, only a Team that actively mismatches excludes a row.
+    Pass team=None (default) to return every eligible holder of role_code
+    regardless of team.
     """
     conn = get_connection()
     try:
         cur = conn.cursor()
-        cur.execute(
-            "SELECT DISTINCT u.User_Key, u.Display_Name "
+        sql = (
+            "SELECT DISTINCT u.User_Key, u.Display_Name, u.Team "
             "FROM [etransactions].[AppUserRole] r "
             "JOIN [etransactions].[AppUser] u ON u.User_Key = r.User_Key "
-            "WHERE r.Role_Code = ? AND r.Is_Active = 1 AND u.Active_Status = 1 "
-            "ORDER BY u.Display_Name",
-            [role_code],
+            "WHERE r.Role_Code = ? AND r.Is_Active = 1 AND u.Active_Status = 1"
         )
-        return [{"user_key": r[0], "display_name": r[1]} for r in cur.fetchall()]
+        params = [role_code]
+        if team:
+            sql += " AND (u.Team = ? OR u.Team IS NULL OR u.Team = '')"
+            params.append(team)
+        sql += " ORDER BY u.Display_Name"
+        cur.execute(sql, params)
+        return [{"user_key": r[0], "display_name": r[1], "team": r[2] or ""} for r in cur.fetchall()]
     finally:
         conn.close()
 
@@ -922,6 +934,8 @@ SELECT
     ISNULL(v.Internal_Doc_Not_Used_Flag,   0)      AS internal_doc_not_used,
     ISNULL(v.Instructions_Previously_Used, 0)      AS instructions_previously_used,
     v.Last_Used_Date                               AS last_used_date,
+    v.Prior_Transaction_Key                         AS prior_transaction_key,
+    priorTxn.Request_ID                             AS prior_request_id,
     ISNULL(be.Classification, '')                   AS entity_classification,
     t.CurrentOwner_User_Key                         AS current_owner_user_key,
     t.BankReleaser_User_Key                          AS bank_releaser_user_key
@@ -940,6 +954,8 @@ LEFT JOIN [etransactions].[BeneficiaryBankInstruction] bi
       ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
 LEFT JOIN [etransactions].[TransactionVerification] v
       ON v.Transaction_Key = t.Transaction_Key
+LEFT JOIN [etransactions].[ETransaction] priorTxn
+      ON priorTxn.Transaction_Key = v.Prior_Transaction_Key
 LEFT JOIN [etransactions].[BusinessEntity] be
       ON be.Entity_Key = t.Entity_Key
 WHERE t.Request_ID = ?
@@ -1592,6 +1608,29 @@ def get_beneficiary_instruction_sensitive_field(beneficiary_instruction_key: int
         conn.close()
 
 
+def get_draft_beneficiary_instruction_key(transaction_key: int, prepared_by_user_key: int):
+    """
+    Return the BeneficiaryInstruction_Key for a Draft owned by `prepared_by_user_key`,
+    or None if it doesn't exist/isn't owned/isn't still a Draft. Lets the final-submit
+    prior-use check resolve the REAL already-stored receiving account/routing number
+    when the finalize form leaves those fields blank (meaning "keep the existing
+    masked value" — see _validate_intake_submission()'s has_stored_receiving_bank_instruction) —
+    never substitutes a blank form value for the real one in the match comparison.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT BeneficiaryInstruction_Key FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def get_transaction_banking_keys(request_id: str):
     """
     Return {"originating_bank_account_key", "beneficiary_instruction_key"} for a
@@ -1903,7 +1942,10 @@ def insert_transaction(data: dict) -> str:
         rule_key        = rule["approval_rule_key"]
         requires_vp     = rule["requires_vp"]
         requires_cfo    = rule["requires_cfo"]
-        tier            = workflow.approval_tier_label(requires_vp=requires_vp, requires_cfo=requires_cfo)
+        tier            = workflow.approval_tier_label(
+            requires_vp=requires_vp, requires_cfo=requires_cfo,
+            entity_classification=data.get("classification"),
+        )
 
         # Insert ETransaction
         cur.execute(

@@ -35,6 +35,7 @@ def _valid_intake_form(**overrides):
         "recv_bank_address": "",
         "instructions_previously_used": "yes",
         "last_used_date": "2026-01-01",
+        "prior_use_ack": "TXN-X",
         "verbal_confirmed_with_known": "",
         "verbal_contact_name": "",
         "verbal_confirm_datetime": "",

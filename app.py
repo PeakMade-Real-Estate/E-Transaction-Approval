@@ -594,6 +594,48 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     return errors
 
 
+def _resolve_prior_use_match(frm, *, draft_transaction_key_raw, prepared_by_user_key):
+    """
+    Independently (re-)derive the exact prior-use beneficiary match for the
+    CURRENTLY entered payee/bank/account/routing fields — shared by the
+    intake precheck endpoint (INT-017 acknowledgment UX) and the final
+    submission validator, so the two can never drift from each other or from
+    db.find_prior_completed_beneficiary_match()'s own exact-match rules.
+
+    Finalizing a Draft may leave recv_account_number/recv_routing_number
+    blank to mean "keep the already-stored value" (Batch 3 — masked values
+    are never redisplayed editable) — resolved here against the REAL stored
+    value, never a blank form field, or a genuine unchanged-instructions
+    match can never be found.
+
+    Never raises — fails safe to None (treated as "no match found", the
+    stricter outcome) on any lookup error.
+    """
+    match_account_number = frm.get("recv_account_number", "")
+    match_routing_number = frm.get("recv_routing_number", "")
+    try:
+        if draft_transaction_key_raw and not (match_account_number.strip() and match_routing_number.strip()):
+            bi_key = db.get_draft_beneficiary_instruction_key(
+                int(draft_transaction_key_raw), prepared_by_user_key
+            )
+            if bi_key:
+                if not match_account_number.strip():
+                    match_account_number = db.get_beneficiary_instruction_sensitive_field(
+                        bi_key, "Receiving_Account_Number") or ""
+                if not match_routing_number.strip():
+                    match_routing_number = db.get_beneficiary_instruction_sensitive_field(
+                        bi_key, "Receiving_Routing_Number") or ""
+        return db.find_prior_completed_beneficiary_match(
+            payee_name=frm.get("recv_payee_name", ""),
+            receiving_bank_name=frm.get("recv_bank_name", ""),
+            receiving_account_number=match_account_number,
+            receiving_routing_number=match_routing_number,
+        )
+    except Exception:
+        app.logger.exception("Unable to check prior beneficiary instruction history")
+        return None
+
+
 _DRAFT_ALLOWED_REQUEST_TYPES = ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT')
 
 
@@ -1118,11 +1160,11 @@ def _handle_save_draft(frm, prepared_by_user):
         "bank_account_key": int(bank_account_key_raw),
         "approver_key":     int(frm.get("approver_key")),
         "controller_key":   int(frm.get("controller_key")),
-        "recv_payee_name":    frm.get("recv_payee_name", ""),
+        "recv_payee_name":    frm.get("recv_payee_name", "").strip(),
         "recv_contact_name":  frm.get("recv_contact_name", ""),
         "recv_contact_email": frm.get("recv_contact_email", ""),
         "recv_contact_phone": frm.get("recv_contact_phone", ""),
-        "recv_bank_name":     frm.get("recv_bank_name", ""),
+        "recv_bank_name":     frm.get("recv_bank_name", "").strip(),
         "recv_account_name":  frm.get("recv_account_name", ""),
         "recv_account_number": frm.get("recv_account_number", "").strip(),
         "recv_routing_number": frm.get("recv_routing_number", "").strip(),
@@ -1458,17 +1500,12 @@ def intake_submit():
         # Only meaningful once the basic receiving-bank fields themselves are valid.
         prior_transaction_key = None
         previously_used_claimed = frm.get("instructions_previously_used") == "yes"
+        prior_use_ack = (frm.get("prior_use_ack") or "").strip()
         if not errors:
-            try:
-                prior_match = db.find_prior_completed_beneficiary_match(
-                    payee_name=frm.get("recv_payee_name", ""),
-                    receiving_bank_name=frm.get("recv_bank_name", ""),
-                    receiving_account_number=frm.get("recv_account_number", ""),
-                    receiving_routing_number=frm.get("recv_routing_number", ""),
-                )
-            except Exception:
-                app.logger.exception("Unable to check prior beneficiary instruction history")
-                prior_match = None
+            prior_match = _resolve_prior_use_match(
+                frm, draft_transaction_key_raw=draft_transaction_key_raw,
+                prepared_by_user_key=prepared_by_user["user_key"],
+            )
 
             if previously_used_claimed and prior_match is None:
                 errors.append(
@@ -1484,7 +1521,19 @@ def intake_submit():
                     f"receiving bank details if this is actually a new payee/account."
                 )
             elif previously_used_claimed and prior_match is not None:
-                prior_transaction_key = prior_match["transaction_key"]
+                # INT-017: the hidden acknowledgment is never trusted by itself —
+                # it must name the SAME prior Request_ID this fresh lookup just
+                # found. Any change to payee/bank/account/routing after the
+                # requester acknowledged automatically invalidates a stale
+                # acknowledgment, since prior_match is recomputed from whatever
+                # is currently in the form, not from what was true earlier.
+                if prior_use_ack != prior_match["request_id"]:
+                    errors.append(
+                        "Please review the matched prior transaction and confirm these are the same "
+                        "beneficiary banking instructions before submitting."
+                    )
+                else:
+                    prior_transaction_key = prior_match["transaction_key"]
 
         if errors:
             for err in errors:
@@ -1555,11 +1604,11 @@ def intake_submit():
                     "avs_score":             frm.get("avs_score", ""),
                     "external_source":       frm.get("external_source") == "on",
                     "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
-                    "recv_payee_name":       frm.get("recv_payee_name", ""),
-                    "recv_bank_name":        frm.get("recv_bank_name", ""),
+                    "recv_payee_name":       frm.get("recv_payee_name", "").strip(),
+                    "recv_bank_name":        frm.get("recv_bank_name", "").strip(),
                     "recv_account_name":     frm.get("recv_account_name", ""),
-                    "recv_account_number":   frm.get("recv_account_number", ""),
-                    "recv_routing_number":   frm.get("recv_routing_number", ""),
+                    "recv_account_number":   frm.get("recv_account_number", "").strip(),
+                    "recv_routing_number":   frm.get("recv_routing_number", "").strip(),
                     "recv_bank_address":     frm.get("recv_bank_address", ""),
                     "recv_contact_name":     frm.get("recv_contact_name", ""),
                     "recv_contact_email":    frm.get("recv_contact_email", ""),
@@ -1569,6 +1618,7 @@ def intake_submit():
                     "requires_cfo":       resolved_rule["requires_cfo"],
                     "approval_tier": workflow.approval_tier_label(
                         requires_vp=resolved_rule["requires_vp"], requires_cfo=resolved_rule["requires_cfo"],
+                        entity_classification=(frm.get("classification") or "").strip().lower(),
                     ),
                 }
                 db.finalize_draft_submission(transaction_key, finalize_data, prepared_by_user_key=prepared_by_user["user_key"])
@@ -1632,11 +1682,11 @@ def intake_submit():
                 "avs_score":             frm.get("avs_score", ""),
                 "external_source":       frm.get("external_source") == "on",
                 "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
-                "recv_payee_name":       frm.get("recv_payee_name", ""),
-                "recv_bank_name":        frm.get("recv_bank_name", ""),
+                "recv_payee_name":       frm.get("recv_payee_name", "").strip(),
+                "recv_bank_name":        frm.get("recv_bank_name", "").strip(),
                 "recv_account_name":     frm.get("recv_account_name", ""),
-                "recv_account_number":   frm.get("recv_account_number", ""),
-                "recv_routing_number":   frm.get("recv_routing_number", ""),
+                "recv_account_number":   frm.get("recv_account_number", "").strip(),
+                "recv_routing_number":   frm.get("recv_routing_number", "").strip(),
                 "recv_bank_address":     frm.get("recv_bank_address", ""),
                 "recv_contact_name":     frm.get("recv_contact_name", ""),
                 "recv_contact_email":    frm.get("recv_contact_email", ""),
@@ -1698,6 +1748,41 @@ def intake_submit():
     _upload_intake_attachments(request_id)
 
     return redirect(url_for("confirmation", request_id=request_id))
+
+
+@app.route("/intake/prior-use-check", methods=["POST"])
+def intake_prior_use_check():
+    """
+    INT-017 acknowledgment UX: lets the intake page show the matched prior
+    Request_ID/last-used date and let the requester acknowledge it WITHOUT
+    navigating away — a full page reload would silently clear the browser's
+    already-selected required attachment files. This is a read-only precheck
+    only; it is NOT trusted as proof of anything — /intake/submit's own Part 2
+    independently re-runs this exact same lookup before ever writing to SQL.
+    """
+    if not has_role("submitter"):
+        return jsonify({"success": False, "reason": "Unauthorized."}), 403
+    if not database_enabled():
+        return jsonify({"success": True, "matched": False})
+
+    prepared_by_user = current_app_user()
+    if prepared_by_user is None:
+        return jsonify({"success": False, "reason": "Your signed-in account could not be matched to an active AppUser record."}), 403
+
+    frm = request.form
+    draft_transaction_key_raw = frm.get("transaction_key", "").strip()
+    prior_match = _resolve_prior_use_match(
+        frm, draft_transaction_key_raw=draft_transaction_key_raw,
+        prepared_by_user_key=prepared_by_user["user_key"],
+    )
+    if prior_match is None:
+        return jsonify({"success": True, "matched": False})
+    return jsonify({
+        "success": True,
+        "matched": True,
+        "request_id": prior_match["request_id"],
+        "last_used_date": prior_match["last_used_date"],
+    })
 
 
 def _authorized_group_keys_by_role(user_key, roles):
@@ -2263,7 +2348,8 @@ def request_detail(request_id):
         display["can_reassign"] = True
         display["reassignment_workflow_role"] = workflow_role
         try:
-            display["reassignment_candidates"] = db.get_reassignment_candidates(role_code)
+            team = workflow.team_for_classification(record.get("entity_classification"))
+            display["reassignment_candidates"] = db.get_reassignment_candidates(role_code, team=team)
         except Exception:
             app.logger.exception("Unable to load reassignment candidates for %s", request_id)
 
