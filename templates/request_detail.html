@@ -159,9 +159,22 @@
                     </div>
                     {% endmacro %}
 
+                    {% macro fact_item(value, label) %}
+                    <div class="col-12">
+                        <div class="d-flex align-items-center gap-2">
+                            {% if value %}
+                            <i class="fas fa-check-circle checklist-complete fa-sm"></i>
+                            {% else %}
+                            <i class="fas fa-minus-circle checklist-na fa-sm"></i>
+                            {% endif %}
+                            <span class="{% if not value %}text-muted{% endif %}">{{ label }}</span>
+                        </div>
+                    </div>
+                    {% endmacro %}
+
                     {{ check_item(record.verbal_confirmed,      'Wire/ACH instructions verbally confirmed') }}
-                    {{ check_item(record.external_source,       'Instructions from external source') }}
-                    {{ check_item(record.internal_doc_not_used, 'Internal document NOT used as backup') }}
+                    {{ fact_item(record.external_source,        'Instructions from external source') }}
+                    {{ fact_item(record.internal_doc_not_used,  'Internal document NOT used as backup') }}
 
                     {% if record.verbal_confirmed %}
                     <div class="col-12 mt-2">
@@ -211,14 +224,17 @@
                                 </div>
                                 {% set attachments = record.get('attachments', {}) %}
                                 {% set attachment_urls = record.get('attachment_urls', {}) %}
-                                {% set docs = record.get('docs_checklist', {}) %}
                                 <div class="col-sm-4">
                                     <span class="section-label">AVS Validation Evidence</span>
                                     <div class="mt-1 small text-muted mb-1">WF AVS screenshot</div>
                                     <div>
-                                        {% if docs.get('wf_avs_screenshot') %}
-                                        <i class="fas fa-check-circle text-success me-1"></i>
-                                        <span class="text-success fw-semibold">Attached</span>
+                                        {% if attachments.get('avs_screenshot') %}
+                                        <i class="fas fa-paperclip text-success me-1"></i>
+                                        {% if attachment_urls.get('avs_screenshot') %}
+                                        <a href="{{ attachment_urls.avs_screenshot }}" target="_blank" rel="noopener" class="text-success fw-semibold">{{ attachments.avs_screenshot }}</a>
+                                        {% else %}
+                                        <span class="text-success fw-semibold">{{ attachments.avs_screenshot }}</span>
+                                        {% endif %}
                                         {% elif prior_use_validated %}
                                         <span class="text-muted">Not required</span>
                                         {% else %}

@@ -89,6 +89,7 @@ DOC_TYPE_BANK_RELEASE_EVIDENCE        = "Bank Release Evidence"         # Proper
 # Maps a DocumentType back to the request_detail.html `attachments` dict key it already renders.
 DOC_TYPE_TO_ATTACHMENT_KEY = {
     DOC_TYPE_VALIDATION_EVIDENCE:   "validation_evidence",
+    DOC_TYPE_AVS_SCREENSHOT:        "avs_screenshot",
     DOC_TYPE_WIRE_ACH_INSTRUCTIONS: "wire_ach_instructions",
     DOC_TYPE_PAYMENT_SUPPORT:       "payment_support",
 }

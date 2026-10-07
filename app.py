@@ -272,15 +272,32 @@ _EVIDENCE_REQUIRED_ACTIONS = {
 }
 
 
+def _validation_evidence_doc_type(frm):
+    """
+    The single "Validation Evidence" upload represents either the WF AVS
+    screenshot (AVS Score >= 90) or an alternative-verification document
+    (score below 90 or not entered) — tag it with the matching SharePoint
+    DocumentType so the detail page can tell the two apart, using the SAME
+    threshold already shown to the requester in intake.html's low-score warning.
+    """
+    try:
+        score = int((frm.get("avs_score") or "").strip())
+    except ValueError:
+        return sharepoint.DOC_TYPE_VALIDATION_EVIDENCE
+    return sharepoint.DOC_TYPE_AVS_SCREENSHOT if score >= 90 else sharepoint.DOC_TYPE_VALIDATION_EVIDENCE
+
+
 def _upload_intake_attachments(request_id):
     """Upload the Section B/D/E intake files to the SharePoint library, if enabled."""
     if not sharepoint_enabled():
         return
     role = current_roles_display()
-    for field_name, section, doc_type, is_required in _INTAKE_ATTACHMENT_FIELDS.values():
+    for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
         file_storage = request.files.get(field_name)
         if not file_storage or not file_storage.filename:
             continue
+        if field_key == "validation_evidence":
+            doc_type = _validation_evidence_doc_type(request.form)
         try:
             sharepoint.upload_attachment(
                 request_id, file_storage,
@@ -305,10 +322,12 @@ def _upload_required_intake_attachments(request_id):
     if not sharepoint_enabled():
         return
     role = current_roles_display()
-    for field_name, section, doc_type, is_required in _INTAKE_ATTACHMENT_FIELDS.values():
+    for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
         file_storage = request.files.get(field_name)
         if not file_storage or not file_storage.filename:
             continue
+        if field_key == "validation_evidence":
+            doc_type = _validation_evidence_doc_type(request.form)
         sharepoint.upload_attachment(
             request_id, file_storage,
             section=section, doc_type=doc_type,
@@ -1093,6 +1112,10 @@ def _draft_files_present(request_id):
             app.logger.exception("Unable to check existing draft attachments for %s", request_id)
             existing = []
         existing_keys = {sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item["doc_type"]) for item in existing}
+        # The single required "Validation Evidence" slot may have been stored under
+        # either DocumentType (AVS screenshot vs. alternative verification).
+        if "avs_screenshot" in existing_keys:
+            existing_keys.add("validation_evidence")
         for key in present:
             if not present[key] and key in existing_keys:
                 present[key] = True
