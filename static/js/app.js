@@ -12,6 +12,7 @@ function initializeIdleTimeout() {
     const body = document.body;
     if (body.dataset.idleTimeoutEnabled !== 'true') return;
     const timeoutSeconds = Number(body.dataset.idleTimeoutSeconds || 0);
+    const warningSeconds = Number(body.dataset.idleTimeoutWarningSeconds || 0);
     const activityUrl = body.dataset.sessionActivityUrl;
     const timeoutUrl = body.dataset.sessionTimeoutUrl;
     const serverActivityMs = Number(body.dataset.lastVerifiedActivityMs || 0);
@@ -19,6 +20,7 @@ function initializeIdleTimeout() {
 
     const storageKey = 'etransaction:lastUserActivityMs';
     const timeoutMs = timeoutSeconds * 1000;
+    const warningMs = warningSeconds * 1000;
     const serverUpdateIntervalMs = 30 * 1000;
     function readStoredActivity() {
         try {
@@ -33,11 +35,56 @@ function initializeIdleTimeout() {
     let lastServerUpdateMs = serverActivityMs;
     let lastBrowserRecordMs = 0;
     let expirationStarted = false;
+    let warningVisible = false;
+
+    const warningModalEl = document.getElementById('idle-timeout-modal');
+    const countdownEl = document.getElementById('idle-timeout-countdown');
+    const warningModal = (warningModalEl && window.bootstrap)
+        ? bootstrap.Modal.getOrCreateInstance(warningModalEl)
+        : null;
+
+    function formatCountdown(ms) {
+        const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+        return minutes + ':' + String(seconds).padStart(2, '0');
+    }
+
+    function showWarning(remainingMs) {
+        if (countdownEl) countdownEl.textContent = formatCountdown(remainingMs);
+        if (!warningVisible && warningModal) {
+            warningModal.show();
+            warningVisible = true;
+        }
+    }
+
+    function hideWarning() {
+        if (warningVisible && warningModal) {
+            warningModal.hide();
+        }
+        warningVisible = false;
+    }
 
     function expireSession() {
         if (expirationStarted) return;
         expirationStarted = true;
+        hideWarning();
         window.location.replace(timeoutUrl);
+    }
+
+    // Single source of truth for what the idle state should look like right
+    // now — called after every activity update AND on the 1-second ticker, so
+    // the warning modal and countdown never depend on which path ran last.
+    function evaluateIdleState() {
+        if (expirationStarted) return;
+        const remainingMs = timeoutMs - (Date.now() - lastUserActivityMs);
+        if (remainingMs <= 0) {
+            expireSession();
+        } else if (warningMs > 0 && remainingMs <= warningMs) {
+            showWarning(remainingMs);
+        } else {
+            hideWarning();
+        }
     }
 
     async function notifyServer(activityMs) {
@@ -58,6 +105,13 @@ function initializeIdleTimeout() {
         }
     }
 
+    function registerActivity(now) {
+        lastUserActivityMs = now;
+        try { localStorage.setItem(storageKey, String(now)); } catch (error) { /* storage unavailable */ }
+        notifyServer(now);
+        evaluateIdleState();
+    }
+
     function recordUserActivity(event) {
         if (expirationStarted || !event.isTrusted) return;
         const now = Date.now();
@@ -67,27 +121,36 @@ function initializeIdleTimeout() {
         }
         if (now - lastBrowserRecordMs < 1000) return;
         lastBrowserRecordMs = now;
-        lastUserActivityMs = now;
-        try { localStorage.setItem(storageKey, String(now)); } catch (error) { /* storage unavailable */ }
-        notifyServer(now);
+        registerActivity(now);
     }
 
     ['pointerdown', 'pointermove', 'keydown', 'click', 'touchstart', 'scroll'].forEach(eventName => {
         window.addEventListener(eventName, recordUserActivity, { passive: true });
     });
 
+    // Dedicated handler (bypasses the 1-second passive-activity throttle above)
+    // so the explicit "Stay Logged In" action always registers immediately.
+    const stayLoggedInBtn = document.getElementById('idle-timeout-stay-btn');
+    if (stayLoggedInBtn) {
+        stayLoggedInBtn.addEventListener('click', () => {
+            lastBrowserRecordMs = Date.now();
+            registerActivity(lastBrowserRecordMs);
+        });
+    }
+
     window.addEventListener('storage', event => {
         if (event.key !== storageKey || !event.newValue) return;
         const sharedActivityMs = Number(event.newValue);
         if (Number.isFinite(sharedActivityMs) && sharedActivityMs > lastUserActivityMs) {
             lastUserActivityMs = sharedActivityMs;
+            evaluateIdleState();
         }
     });
 
     window.setInterval(() => {
         const sharedActivityMs = readStoredActivity();
         if (sharedActivityMs > lastUserActivityMs) lastUserActivityMs = sharedActivityMs;
-        if (Date.now() - lastUserActivityMs >= timeoutMs) expireSession();
+        evaluateIdleState();
     }, 1000);
 }
 

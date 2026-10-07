@@ -20,6 +20,18 @@ class IdleTimeoutConfigurationTests(unittest.TestCase):
                 app_module.resolve_idle_timeout_minutes(value)
 
 
+class IdleTimeoutWarningConfigurationTests(unittest.TestCase):
+    def test_defaults_to_two_minutes_for_the_standard_five_minute_timeout(self):
+        self.assertEqual(app_module.resolve_idle_timeout_warning_seconds(300), 120)
+
+    def test_clamped_to_half_the_timeout_when_timeout_is_short(self):
+        # A 60-second configured timeout must never warn before the session starts.
+        self.assertEqual(app_module.resolve_idle_timeout_warning_seconds(60), 30)
+
+    def test_never_below_one_second(self):
+        self.assertEqual(app_module.resolve_idle_timeout_warning_seconds(1), 1)
+
+
 class IdleTimeoutRequestTests(unittest.TestCase):
     def setUp(self):
         self.client = app_module.app.test_client()
@@ -104,6 +116,18 @@ class IdleTimeoutRequestTests(unittest.TestCase):
         self.assertIn("/.auth/login/aad?post_login_redirect_uri=%2F", response.headers["Location"])
         self.assertNotIn("/.auth/logout", response.headers["Location"])
         self.assertIn("AppServiceAuthSession=", response.headers.get("Set-Cookie", ""))
+
+    def test_dashboard_page_exposes_warning_seconds_and_modal_markup(self):
+        self._set_session(role="submitter", last_activity=100.0)
+        with patch.object(app_module, "_now_timestamp", return_value=100.0):
+            response = self.client.get("/dashboard")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_data(as_text=True)
+        self.assertIn('data-idle-timeout-warning-seconds="120"', body)
+        self.assertIn('id="idle-timeout-modal"', body)
+        self.assertIn('id="idle-timeout-stay-btn"', body)
+        self.assertIn('id="idle-timeout-countdown"', body)
 
 
 if __name__ == "__main__":

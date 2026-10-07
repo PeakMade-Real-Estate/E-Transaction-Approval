@@ -43,6 +43,7 @@ from flask_wtf.csrf import CSRFError
 app = Flask(__name__)
 
 DEFAULT_IDLE_TIMEOUT_MINUTES = 5
+DEFAULT_IDLE_TIMEOUT_WARNING_SECONDS = 120
 SESSION_LAST_ACTIVITY_KEY = "last_verified_user_activity"
 ACTIVITY_UPDATE_MIN_SECONDS = 30
 EASY_AUTH_SESSION_COOKIE = "AppServiceAuthSession"
@@ -59,6 +60,16 @@ def resolve_idle_timeout_minutes(env_value):
     if minutes <= 0:
         raise RuntimeError("IDLE_TIMEOUT_MINUTES must be a positive integer.")
     return minutes
+
+
+def resolve_idle_timeout_warning_seconds(timeout_seconds, warning_seconds=DEFAULT_IDLE_TIMEOUT_WARNING_SECONDS):
+    """
+    Seconds before expiration the "stay logged in?" warning should appear.
+    Clamped to at most half the total timeout so a short configured timeout
+    (e.g. in tests) can never make the warning fire before — or immediately
+    at — session start.
+    """
+    return max(1, min(warning_seconds, timeout_seconds // 2))
 
 
 def _now_timestamp():
@@ -88,6 +99,9 @@ app.config["IDLE_TIMEOUT_MINUTES"] = resolve_idle_timeout_minutes(
     os.environ.get("IDLE_TIMEOUT_MINUTES")
 )
 app.config["IDLE_TIMEOUT_SECONDS"] = app.config["IDLE_TIMEOUT_MINUTES"] * 60
+app.config["IDLE_TIMEOUT_WARNING_SECONDS"] = resolve_idle_timeout_warning_seconds(
+    app.config["IDLE_TIMEOUT_SECONDS"]
+)
 
 # Batch 10 Part 26: session cookie hardening. SECURE is conditional on production
 # posture only — forcing it on in local dev (plain http://) would silently break
@@ -825,6 +839,7 @@ def inject_globals():
         "idle_timeout_enabled": bool(roles),
         "idle_timeout_minutes": app.config["IDLE_TIMEOUT_MINUTES"],
         "idle_timeout_seconds": app.config["IDLE_TIMEOUT_SECONDS"],
+        "idle_timeout_warning_seconds": app.config["IDLE_TIMEOUT_WARNING_SECONDS"],
         "last_verified_activity_ms": int(
             session.get(SESSION_LAST_ACTIVITY_KEY, _now_timestamp()) * 1000
         ),
