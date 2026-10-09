@@ -100,7 +100,8 @@
                                 <div class="form-check mt-1">
                                     <input class="form-check-input" type="checkbox"
                                            id="instructions_previously_used"
-                                           name="instructions_previously_used" value="yes">
+                                           name="instructions_previously_used" value="yes"
+                                           {% if request.form.get('instructions_previously_used') == 'yes' %}checked{% endif %}>
                                     <label class="form-check-label" for="instructions_previously_used">
                                         These instructions have been used previously
                                     </label>
@@ -128,7 +129,7 @@
                                     <div class="form-check">
                                         <input class="form-check-input" type="radio"
                                                name="urgent" id="urgent_yes" value="yes"
-                                               {% if draft and draft.urgent %}checked{% endif %}>
+                                               {% if (draft.urgent if draft else request.form.get('urgent') == 'yes') %}checked{% endif %}>
                                         <label class="form-check-label fw-semibold text-danger" for="urgent_yes">
                                             <i class="fas fa-exclamation-circle me-1"></i>Yes
                                         </label>
@@ -136,7 +137,7 @@
                                     <div class="form-check">
                                         <input class="form-check-input" type="radio"
                                                name="urgent" id="urgent_no" value="no"
-                                               {% if not draft or not draft.urgent %}checked{% endif %}>
+                                               {% if (not draft.urgent if draft else request.form.get('urgent') != 'yes') %}checked{% endif %}>
                                         <label class="form-check-label" for="urgent_no">No</label>
                                     </div>
                                 </div>
@@ -193,12 +194,12 @@
                                 <div class="btn-group" role="group" aria-label="Property or Corporate">
                                     <input type="radio" class="btn-check" name="classification" id="classification_property"
                                            value="property" autocomplete="off"
-                                           {% if draft and draft.classification == 'property' %}checked{% endif %}>
+                                           {% if (draft.classification == 'property' if draft else request.form.get('classification') == 'property') %}checked{% endif %}>
                                     <label class="btn btn-outline-primary btn-sm" for="classification_property">Property</label>
 
                                     <input type="radio" class="btn-check" name="classification" id="classification_corporate"
                                            value="corporate" autocomplete="off"
-                                           {% if draft and draft.classification == 'corporate' %}checked{% endif %}>
+                                           {% if (draft.classification == 'corporate' if draft else request.form.get('classification') == 'corporate') %}checked{% endif %}>
                                     <label class="btn btn-outline-primary btn-sm" for="classification_corporate">Corporate</label>
                                 </div>
                             </div>
@@ -212,7 +213,7 @@
                                     <option value="">&#8212; Select Property &#8212;</option>
                                     {% for p in properties %}
                                     <option value="{{ p.entity_number }}"
-                                        {% if draft and draft.property_entity_number == p.entity_number %}selected{% endif %}>
+                                        {% if (draft.property_entity_number == p.entity_number if draft else request.form.get('property_entity_number') == p.entity_number|string) %}selected{% endif %}>
                                         {{ p.name }}
                                     </option>
                                     {% endfor %}
@@ -249,7 +250,7 @@
                                 <select class="form-select" id="approver" name="approver_key" required>
                                     <option value="">&#8212; Select Approver &#8212;</option>
                                     {% for u in approver_users %}
-                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if draft and draft.approver_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if (draft.approver_key == u.user_key if draft else request.form.get('approver_key') == u.user_key|string) %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
                                 <div class="form-text">Choose Property or Corporate above to narrow this list.</div>
@@ -268,7 +269,7 @@
                                 <select class="form-select" id="controller" name="controller_key" required>
                                     <option value="">&#8212; Select Controller &#8212;</option>
                                     {% for u in controller_users %}
-                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if draft and draft.controller_key == u.user_key %}selected{% endif %}>{{ u.display_name }}</option>
+                                    <option value="{{ u.user_key }}" data-team="{{ u.team }}" {% if (draft.controller_key == u.user_key if draft else request.form.get('controller_key') == u.user_key|string) %}selected{% endif %}>{{ u.display_name }}</option>
                                     {% endfor %}
                                 </select>
                                 <div class="form-text">Choose Property or Corporate above to narrow this list.</div>
@@ -306,7 +307,8 @@
                             <div class="col-12">
                                 <div class="form-check mb-2">
                                     <input class="form-check-input" type="checkbox"
-                                           id="verbal_confirmed" name="verbal_confirmed">
+                                           id="verbal_confirmed" name="verbal_confirmed"
+                                           {% if request.form.get('verbal_confirmed') == 'on' %}checked{% endif %}>
                                     <label class="form-check-label fw-semibold" for="verbal_confirmed">
                                         Wire/ACH instructions verbally confirmed
                                     </label>
@@ -314,14 +316,16 @@
                                 <div class="ps-4 border-start ms-2">
                                     <div class="form-check mb-1">
                                         <input class="form-check-input" type="checkbox"
-                                               id="verbal_with_known" name="verbal_confirmed_with_known">
+                                               id="verbal_with_known" name="verbal_confirmed_with_known"
+                                               {% if request.form.get('verbal_confirmed_with_known') == 'on' %}checked{% endif %}>
                                         <label class="form-check-label small" for="verbal_with_known">
                                             Verbally confirmed with a <strong>known contact</strong>
                                         </label>
                                     </div>
                                     <div class="form-check mb-1">
                                         <input class="form-check-input" type="checkbox"
-                                               id="verbal_with_requester" name="verbal_confirmed_with_requester">
+                                               id="verbal_with_requester" name="verbal_confirmed_with_requester"
+                                               {% if request.form.get('verbal_confirmed_with_requester') == 'on' %}checked{% endif %}>
                                         <label class="form-check-label small" for="verbal_with_requester">
                                             Verbally confirmed with the <strong>person requesting the transaction</strong>
                                         </label>
@@ -337,7 +341,7 @@
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="verbal_confirm_datetime">Verbal Confirmation Date / Time</label>
-                                <input type="datetime-local" class="form-control" id="verbal_confirm_datetime"
+                                <input type="datetime-local" class="form-control" id="verbal_confirm_datetime" value="{{ request.form.get('verbal_confirm_datetime', '') }}"
                                        name="verbal_confirm_datetime">
                             </div>
 
@@ -385,14 +389,16 @@
                                 <div class="card bg-light border-0 p-3">
                                     <div class="form-check mb-2">
                                         <input class="form-check-input" type="checkbox"
-                                               id="external_source" name="external_source">
+                                               id="external_source" name="external_source"
+                                               {% if request.form.get('external_source') == 'on' %}checked{% endif %}>
                                         <label class="form-check-label" for="external_source">
                                             ACH/Wire instructions provided from an <strong>external source</strong>
                                         </label>
                                     </div>
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox"
-                                               id="internal_doc_not_used" name="internal_doc_not_used">
+                                               id="internal_doc_not_used" name="internal_doc_not_used"
+                                               {% if request.form.get('internal_doc_not_used') == 'on' %}checked{% endif %}>
                                         <label class="form-check-label" for="internal_doc_not_used">
                                             An internal document was <strong>not</strong> used as banking instruction backup
                                         </label>
@@ -448,7 +454,7 @@
                                 {% elif draft and draft.bank_account_key %}
                                 <div class="form-text">An originating bank account is already on file for this draft. Search above only if you need to change it.</div>
                                 {% endif %}
-                                <input type="hidden" name="bank_account_key" id="bank_account_key" value="{{ draft.bank_account_key if draft else '' }}">
+                                <input type="hidden" name="bank_account_key" id="bank_account_key" value="{{ draft.bank_account_key if draft else request.form.get('bank_account_key', '') }}">
                                 <input type="hidden" name="orig_bank_name" id="orig_bank_name_hidden">
                                 <input type="hidden" name="orig_account_name" id="orig_account_name_hidden">
                             </div>
@@ -1070,8 +1076,12 @@
         if (addrNote)  addrNote.style.display = isWire ? 'block'  : 'none';
     }
 
-    // ── Pre-submit attachment + Wire validation ───────────────────
-    function validateAttachments(e) {
+    // ── Pre-submit validation: fast client-only structural checks ──
+    // Pure — returns an array of {msg, section}; never touches the DOM or
+    // navigates. Conditional BUSINESS rules (approver eligibility, prior-use,
+    // amount routing, etc.) are never duplicated here — those are checked
+    // authoritatively by the server via runServerPrecheck() below.
+    function collectClientSideErrors() {
         const reqType = document.getElementById('request_type')?.value || '';
         const errors  = [];
 
@@ -1119,11 +1129,16 @@
             errors.push({ msg: 'Please review and confirm the matched prior transaction before submitting.', section: 'sectionA' });
         }
 
-        if (!errors.length) return true;
-        e.preventDefault();
+        return errors;
+    }
 
+    // Shared rendering for BOTH the client-side structural errors above and
+    // the server precheck's business-rule errors (plain strings) — same UI
+    // styling either way, per the existing #attach-errors banner.
+    function renderValidationErrors(errors) {
         const old = document.getElementById('attach-errors');
         if (old) old.remove();
+        if (!errors.length) return;
 
         const banner = document.createElement('div');
         banner.id        = 'attach-errors';
@@ -1132,7 +1147,9 @@
             '<strong><i class="fas fa-exclamation-circle me-1"></i>Please fix the following before submitting:</strong>' +
             '<ul class="mb-0 mt-2">' +
             errors.map(err =>
-                `<li><a class="alert-link" href="#${err.section}" onclick="expandAndScroll('${err.section}')">${err.msg}</a></li>`
+                err.section
+                    ? `<li><a class="alert-link" href="#${err.section}" onclick="expandAndScroll('${err.section}')">${err.msg}</a></li>`
+                    : `<li>${err.msg}</li>`
             ).join('') + '</ul>';
 
         const form = document.getElementById('intake-form');
@@ -1140,12 +1157,112 @@
         banner.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
         errors.forEach(err => {
+            if (!err.section) return;
             const item = document.getElementById(err.section)?.closest('.accordion-item');
             if (item) {
                 item.classList.add('border', 'border-danger');
                 setTimeout(() => item.classList.remove('border', 'border-danger'), 4000);
             }
         });
+    }
+
+    // ── Server-backed authoritative pre-submit validation (UAT fix) ────
+    // Sends every NON-FILE field exactly as the browser would submit it,
+    // plus simple has_<slot>=true/false flags for the three required
+    // attachments (never actual file bytes) — lets the server run the SAME
+    // _validate_intake_submission()/prior-use/eligibility rules WITHOUT a
+    // page navigation, so a predictable validation error never clears the
+    // requester's already-selected files. This result is never trusted by
+    // the final multipart POST, which independently reruns every check.
+    function collectPrecheckFormData(form) {
+        const params = new URLSearchParams();
+        for (const [key, value] of new FormData(form).entries()) {
+            if (value instanceof File) continue;  // file bytes are never sent to the precheck
+            params.append(key, value);
+        }
+        const fileFlags = {
+            file_validation_evidence:   'has_validation_evidence',
+            file_wire_ach_instructions: 'has_wire_ach_instructions',
+            file_payment_support:       'has_payment_support',
+        };
+        for (const [fileFieldName, flagName] of Object.entries(fileFlags)) {
+            const input = document.getElementById(fileFieldName);
+            params.append(flagName, (input && input.files && input.files.length) ? 'true' : 'false');
+        }
+        return params;
+    }
+
+    async function runServerPrecheck(form) {
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        const resp = await fetch('{{ url_for("intake_precheck") }}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken },
+            body: collectPrecheckFormData(form).toString(),
+        });
+        const data = await resp.json();
+        if (!data.success) throw new Error(data.reason || 'Precheck failed');
+        return (data.errors || []).map(msg => ({ msg, section: null }));
+    }
+
+    function setSubmitBusy(form, busy) {
+        const btn = form.querySelector('button[type="submit"][value="submit"]');
+        if (!btn) return;
+        btn.disabled = busy;
+        if (busy) {
+            btn.dataset.originalHtml = btn.innerHTML;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Checking…';
+        } else if (btn.dataset.originalHtml) {
+            btn.innerHTML = btn.dataset.originalHtml;
+        }
+    }
+
+    let precheckInFlight = false;
+
+    async function onIntakeFormSubmit(e) {
+        // Save Draft keeps its own existing, lighter-weight behavior —
+        // never gated by Submit Request's structural/business precheck.
+        if (e.submitter && e.submitter.value !== 'submit') return;
+
+        e.preventDefault();
+        if (precheckInFlight) return;
+
+        const clientErrors = collectClientSideErrors();
+        if (clientErrors.length) {
+            renderValidationErrors(clientErrors);
+            return;
+        }
+
+        const form = e.target;
+        precheckInFlight = true;
+        setSubmitBusy(form, true);
+        try {
+            const serverErrors = await runServerPrecheck(form);
+            if (serverErrors.length) {
+                renderValidationErrors(serverErrors);
+                return;
+            }
+            renderValidationErrors([]);
+        } catch (networkErr) {
+            // Fail open — the final POST's own server-side validation remains
+            // authoritative regardless, so a transient precheck failure must
+            // never block a legitimate submission outright.
+        } finally {
+            precheckInFlight = false;
+            setSubmitBusy(form, false);
+        }
+        // form.submit() bypasses the 'submit' event entirely (avoiding
+        // re-entering this handler) but also skips the clicked button's own
+        // name/value pair — restore form_mode=submit explicitly so the
+        // server sees exactly what a native click on "Submit Request" would send.
+        let modeInput = form.querySelector('input[name="form_mode"][type="hidden"]');
+        if (!modeInput) {
+            modeInput = document.createElement('input');
+            modeInput.type = 'hidden';
+            modeInput.name = 'form_mode';
+            form.appendChild(modeInput);
+        }
+        modeInput.value = 'submit';
+        form.submit();
     }
 
     function expandAndScroll(sectionId) {
@@ -1187,7 +1304,7 @@
 
         // Pre-submit validation
         const form = document.getElementById('intake-form');
-        if (form) form.addEventListener('submit', validateAttachments);
+        if (form) form.addEventListener('submit', onIntakeFormSubmit);
     });
 
     {% if bank_accounts %}
@@ -1221,12 +1338,16 @@
     }
 
     function selectBankAccount(btn) {
-        document.getElementById('bank_account_key').value        = btn.dataset.key;
-        document.getElementById('orig_bank_name_hidden').value   = btn.dataset.bank;
-        document.getElementById('orig_account_name_hidden').value = btn.dataset.title;
+        applyBankAccountSelection(btn.dataset.key, btn.dataset.bank, btn.dataset.title, btn.dataset.last4);
+    }
+
+    function applyBankAccountSelection(key, bank, title, last4) {
+        document.getElementById('bank_account_key').value        = key;
+        document.getElementById('orig_bank_name_hidden').value   = bank;
+        document.getElementById('orig_account_name_hidden').value = title;
         document.getElementById('bank-account-results').style.display = 'none';
         document.getElementById('bank-account-selected-label').textContent =
-            btn.dataset.bank + ' — ' + btn.dataset.title + ' (…' + btn.dataset.last4 + ')';
+            bank + ' — ' + title + ' (…' + last4 + ')';
         document.getElementById('bank-account-selected').classList.remove('d-none');
         document.getElementById('acct_last4').disabled = true;
     }
@@ -1242,6 +1363,27 @@
         document.getElementById('bank-account-results').style.display = 'none';
         document.getElementById('bank-account-results').innerHTML = '';
     }
+
+    {% if not draft %}
+    // Restore the visible "selected account" summary after a validation-error
+    // re-render — the hidden bank_account_key field itself already survives
+    // (server-side fallback to request.form), but the friendly label is
+    // JS-rendered only and must be reconstructed from the same BANK_ACCOUNTS list.
+    // Scoped to a fresh (non-draft) submission only — a resumed Draft already
+    // gets its own server-rendered "Currently selected" summary above.
+    document.addEventListener('DOMContentLoaded', function () {
+        const keyEl = document.getElementById('bank_account_key');
+        const preselected = keyEl && keyEl.value
+            ? BANK_ACCOUNTS.find(a => String(a.bank_account_key) === String(keyEl.value))
+            : null;
+        if (preselected) {
+            applyBankAccountSelection(
+                preselected.bank_account_key, preselected.bank_name,
+                preselected.account_title, preselected.account_last4
+            );
+        }
+    });
+    {% endif %}
     {% endif %}
 </script>
 {% endblock %}

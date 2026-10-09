@@ -669,6 +669,69 @@ def _resolve_prior_use_match(frm, *, draft_transaction_key_raw, prepared_by_user
         return None
 
 
+def _validate_eligible_approver_controller(frm):
+    """
+    Defense in depth: the intake.html Approver/Controller dropdowns are
+    already role-filtered (Approver='sam', Controller='controller'), but a
+    crafted direct POST could still submit any user_key — shared by the
+    final submission and the /intake/precheck endpoint so both re-verify
+    server-side identically.
+    """
+    errors = []
+    for field, label, role_code in (("approver_key", "Approver", "sam"), ("controller_key", "Controller", "controller")):
+        raw = (frm.get(field) or "").strip()
+        try:
+            if raw and role_code not in db.get_app_user_role_codes(int(raw)):
+                errors.append(f"The selected {label} is not an eligible {label}.")
+        except ValueError:
+            pass  # non-numeric value already rejected by _validate_intake_submission
+    return errors
+
+
+def _evaluate_prior_use_claim(frm, prior_match):
+    """
+    The single authoritative decision for whether a "Previously Used" claim
+    is consistent with the FRESHLY computed `prior_match`
+    (_resolve_prior_use_match()'s result) — shared by the final submission's
+    Part 2 and the /intake/precheck endpoint so the two can never diverge.
+    Returns (errors: list[str], prior_transaction_key: int | None).
+    """
+    previously_used_claimed = frm.get("instructions_previously_used") == "yes"
+    prior_use_ack = (frm.get("prior_use_ack") or "").strip()
+    errors = []
+    prior_transaction_key = None
+
+    if previously_used_claimed and prior_match is None:
+        errors.append(
+            "These receiving banking instructions could not be verified as previously used and "
+            "completed. Please follow the new/unverified instructions process (verbal confirmation "
+            "with a known contact) instead of marking them as previously used."
+        )
+    elif not previously_used_claimed and prior_match is not None:
+        errors.append(
+            f"These exact receiving banking instructions were already used on a completed transaction "
+            f"({prior_match['request_id']}, {prior_match['last_used_date']}). Please review and check "
+            f"\u201cBanking Instructions Previously Used?\u201d if this is correct, or correct the "
+            f"receiving bank details if this is actually a new payee/account."
+        )
+    elif previously_used_claimed and prior_match is not None:
+        # INT-017: the hidden acknowledgment is never trusted by itself — it
+        # must name the SAME prior Request_ID this fresh lookup just found.
+        # Any change to payee/bank/account/routing after the requester
+        # acknowledged automatically invalidates a stale acknowledgment,
+        # since prior_match is recomputed from whatever is currently in the
+        # form, not from what was true earlier.
+        if prior_use_ack != prior_match["request_id"]:
+            errors.append(
+                "Please review the matched prior transaction and confirm these are the same "
+                "beneficiary banking instructions before submitting."
+            )
+        else:
+            prior_transaction_key = prior_match["transaction_key"]
+
+    return errors, prior_transaction_key
+
+
 _DRAFT_ALLOWED_REQUEST_TYPES = ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT')
 
 
@@ -1108,18 +1171,17 @@ def dev_set_acting_as_user():
     return redirect(url_for("role_select"))
 
 
-def _draft_files_present(request_id):
+def _resolve_files_present(request_id, *, newly_selected):
     """
-    Merge files newly attached in THIS POST with attachments already persisted
-    for an existing Draft's Request_ID (Batch 8 Part 11) — final submission
-    validation must see previously-uploaded draft attachments, not just files
-    re-selected in the same POST.
+    Merge the three required-attachment slots' presence IN THIS REQUEST with
+    whatever is already durably stored in SharePoint for an existing Draft's
+    Request_ID (Batch 8 Part 11) — shared by the real multipart submission
+    (`newly_selected` = actual files chosen in this POST) and the read-only
+    /intake/precheck endpoint (`newly_selected` = a client-asserted selection
+    flag, never trusted as proof of an actual upload there) so "is this
+    required attachment satisfied" is decided by exactly one rule.
     """
-    present = {
-        "validation_evidence":   bool(request.files.get("file_validation_evidence") and request.files["file_validation_evidence"].filename),
-        "wire_ach_instructions": bool(request.files.get("file_wire_ach_instructions") and request.files["file_wire_ach_instructions"].filename),
-        "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
-    }
+    present = dict(newly_selected)
     if request_id and not all(present.values()) and sharepoint_enabled():
         try:
             existing = sharepoint.list_attachments(request_id)
@@ -1135,6 +1197,21 @@ def _draft_files_present(request_id):
             if not present[key] and key in existing_keys:
                 present[key] = True
     return present
+
+
+def _draft_files_present(request_id):
+    """
+    Merge files newly attached in THIS (real multipart) POST with attachments
+    already persisted for an existing Draft's Request_ID — final submission
+    validation must see previously-uploaded draft attachments, not just files
+    re-selected in the same POST.
+    """
+    newly_selected = {
+        "validation_evidence":   bool(request.files.get("file_validation_evidence") and request.files["file_validation_evidence"].filename),
+        "wire_ach_instructions": bool(request.files.get("file_wire_ach_instructions") and request.files["file_wire_ach_instructions"].filename),
+        "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
+    }
+    return _resolve_files_present(request_id, newly_selected=newly_selected)
 
 
 def _handle_save_draft(frm, prepared_by_user):
@@ -1503,11 +1580,15 @@ def intake_submit():
     }
 
     if _db_on:
-        files_present = _draft_files_present(frm.get("request_id", "")) if draft_transaction_key_raw else {
+        newly_selected = {
             "validation_evidence":   bool(request.files.get("file_validation_evidence") and request.files["file_validation_evidence"].filename),
             "wire_ach_instructions": bool(request.files.get("file_wire_ach_instructions") and request.files["file_wire_ach_instructions"].filename),
             "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
         }
+        files_present = (
+            _resolve_files_present(frm.get("request_id", ""), newly_selected=newly_selected)
+            if draft_transaction_key_raw else newly_selected
+        )
         bank_account_key_raw = frm.get("bank_account_key", "").strip()
         bank_account_status = None
         if bank_account_key_raw:
@@ -1522,56 +1603,19 @@ def intake_submit():
             prepared_by_user_key=prepared_by_user["user_key"],
         )
 
-        # Defense in depth: the intake.html dropdowns are already role-filtered
-        # (Approver='sam', Controller='controller'), but a crafted direct POST
-        # could still submit any user_key — re-verify server-side.
         if not errors:
-            for field, label, role_code in (("approver_key", "Approver", "sam"), ("controller_key", "Controller", "controller")):
-                raw = (frm.get(field) or "").strip()
-                try:
-                    if raw and role_code not in db.get_app_user_role_codes(int(raw)):
-                        errors.append(f"The selected {label} is not an eligible {label}.")
-                except ValueError:
-                    pass  # non-numeric value already rejected by _validate_intake_submission
+            errors.extend(_validate_eligible_approver_controller(frm))
 
         # Part 2 — validate the "Previously Used" claim against completed history.
         # Only meaningful once the basic receiving-bank fields themselves are valid.
         prior_transaction_key = None
-        previously_used_claimed = frm.get("instructions_previously_used") == "yes"
-        prior_use_ack = (frm.get("prior_use_ack") or "").strip()
         if not errors:
             prior_match = _resolve_prior_use_match(
                 frm, draft_transaction_key_raw=draft_transaction_key_raw,
                 prepared_by_user_key=prepared_by_user["user_key"],
             )
-
-            if previously_used_claimed and prior_match is None:
-                errors.append(
-                    "These receiving banking instructions could not be verified as previously used and "
-                    "completed. Please follow the new/unverified instructions process (verbal confirmation "
-                    "with a known contact) instead of marking them as previously used."
-                )
-            elif not previously_used_claimed and prior_match is not None:
-                errors.append(
-                    f"These exact receiving banking instructions were already used on a completed transaction "
-                    f"({prior_match['request_id']}, {prior_match['last_used_date']}). Please review and check "
-                    f"\u201cBanking Instructions Previously Used?\u201d if this is correct, or correct the "
-                    f"receiving bank details if this is actually a new payee/account."
-                )
-            elif previously_used_claimed and prior_match is not None:
-                # INT-017: the hidden acknowledgment is never trusted by itself —
-                # it must name the SAME prior Request_ID this fresh lookup just
-                # found. Any change to payee/bank/account/routing after the
-                # requester acknowledged automatically invalidates a stale
-                # acknowledgment, since prior_match is recomputed from whatever
-                # is currently in the form, not from what was true earlier.
-                if prior_use_ack != prior_match["request_id"]:
-                    errors.append(
-                        "Please review the matched prior transaction and confirm these are the same "
-                        "beneficiary banking instructions before submitting."
-                    )
-                else:
-                    prior_transaction_key = prior_match["transaction_key"]
+            prior_use_errors, prior_transaction_key = _evaluate_prior_use_claim(frm, prior_match)
+            errors.extend(prior_use_errors)
 
         if errors:
             for err in errors:
@@ -1786,6 +1830,88 @@ def intake_submit():
     _upload_intake_attachments(request_id)
 
     return redirect(url_for("confirmation", request_id=request_id))
+
+
+@app.route("/intake/precheck", methods=["POST"])
+def intake_precheck():
+    """
+    UAT fix: read-only pre-submit validation reusing the EXACT SAME
+    authoritative rules _validate_intake_submission() (plus the eligible-
+    approver/controller check and prior-use verification) enforces at final
+    submit — so a predictable business-rule error can be shown WITHOUT
+    navigating away, and the requester's already-selected native file inputs
+    (which can never be restored after any page reload) are never lost.
+
+    This is a UX layer only. It creates no ETransaction/Draft/WorkflowEvent,
+    uploads no file, sends no notification, and its result is NEVER trusted
+    by the final /intake/submit POST, which independently reruns every one
+    of these checks plus the database writes. CSRF-protected the same as
+    every other POST route (global CSRFProtect); requires the submitter role.
+
+    Required-attachment presence is taken from client-asserted
+    has_<slot>=true/false flags (the browser never sends file bytes here) —
+    this is only ever used for this precheck's own UX feedback, never as
+    proof that a real file exists; the final multipart POST re-checks the
+    actual files.
+    """
+    if not has_role("submitter"):
+        return jsonify({"success": False, "reason": "Unauthorized."}), 403
+
+    frm = request.form
+    _db_on = database_enabled()
+    prepared_by_user = current_app_user() if _db_on else None
+    if _db_on and prepared_by_user is None:
+        return jsonify({
+            "success": True,
+            "errors": ["Your signed-in account could not be matched to an active AppUser record; "
+                       "this request cannot be submitted. Contact an administrator."],
+        })
+
+    draft_transaction_key_raw = frm.get("transaction_key", "").strip()
+    newly_selected = {
+        "validation_evidence":   frm.get("has_validation_evidence") == "true",
+        "wire_ach_instructions": frm.get("has_wire_ach_instructions") == "true",
+        "payment_support":       frm.get("has_payment_support") == "true",
+    }
+    files_present = (
+        _resolve_files_present(frm.get("request_id", ""), newly_selected=newly_selected)
+        if draft_transaction_key_raw else newly_selected
+    )
+
+    bank_account_status = None
+    bank_account_key_raw = (frm.get("bank_account_key") or "").strip()
+    if bank_account_key_raw and _db_on:
+        try:
+            bank_account_status = db.get_bank_account_status(int(bank_account_key_raw))
+        except Exception:
+            bank_account_status = None
+
+    errors = _validate_intake_submission(
+        frm, files_present=files_present, bank_account_status=bank_account_status,
+        has_stored_receiving_bank_instruction=bool(draft_transaction_key_raw),
+        prepared_by_user_key=(prepared_by_user["user_key"] if prepared_by_user else None),
+    )
+
+    if not errors and _db_on:
+        errors.extend(_validate_eligible_approver_controller(frm))
+
+    if not errors and _db_on:
+        try:
+            db.resolve_approval_rule(float((frm.get("amount") or "0").replace(",", "") or 0))
+        except db.ApprovalRuleConfigurationError as exc:
+            errors.append(f"Unable to route this request: {exc}")
+        except Exception:
+            pass  # non-numeric amount already rejected by _validate_intake_submission
+
+    if not errors and _db_on and prepared_by_user is not None:
+        prior_match = _resolve_prior_use_match(
+            frm, draft_transaction_key_raw=draft_transaction_key_raw,
+            prepared_by_user_key=prepared_by_user["user_key"],
+        )
+        prior_use_errors, _ = _evaluate_prior_use_claim(frm, prior_match)
+        errors.extend(prior_use_errors)
+
+    return jsonify({"success": True, "errors": errors})
 
 
 @app.route("/intake/prior-use-check", methods=["POST"])
