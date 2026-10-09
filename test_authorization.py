@@ -11,6 +11,7 @@ test_dashboard_scoping.py.
 Run:  python -m unittest test_authorization -v
 """
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 
 import authorization
 import db

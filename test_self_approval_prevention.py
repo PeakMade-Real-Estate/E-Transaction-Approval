@@ -5,6 +5,7 @@ themselves as their own Approver or Controller.
 Run:  python -m unittest test_self_approval_prevention -v
 """
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import patch
 
 import app as app_module

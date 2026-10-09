@@ -9,6 +9,7 @@ Run:  python -m unittest test_treasury_evidence -v
 """
 import io
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import patch
 
 import app as app_module
@@ -394,10 +395,12 @@ class ExistingAttachmentRegressionTests(unittest.TestCase):
             content_type="multipart/form-data",
         ):
             with patch.object(app_module, "sharepoint_enabled", return_value=True):
-                with patch.object(app_module.sharepoint, "upload_attachment") as mock_upload:
+                with patch.object(app_module.sharepoint, "upload_attachment") as mock_upload, \
+                     patch.object(app_module.sharepoint, "retag_validation_evidence") as mock_retag:
                     app_module._upload_required_intake_attachments("TXN-2026-801")
         _, kwargs = mock_upload.call_args
         self.assertEqual(kwargs["doc_type"], sharepoint.DOC_TYPE_PAYMENT_SUPPORT)
+        mock_retag.assert_called_once()
 
     def test_28_wire_ach_instructions_upload_unchanged(self):
         with app_module.app.test_request_context(
@@ -405,11 +408,13 @@ class ExistingAttachmentRegressionTests(unittest.TestCase):
             content_type="multipart/form-data",
         ):
             with patch.object(app_module, "sharepoint_enabled", return_value=True):
-                with patch.object(app_module.sharepoint, "upload_attachment") as mock_upload:
+                with patch.object(app_module.sharepoint, "upload_attachment") as mock_upload, \
+                     patch.object(app_module.sharepoint, "retag_validation_evidence") as mock_retag:
                     app_module._upload_required_intake_attachments("TXN-2026-802")
         _, kwargs = mock_upload.call_args
         self.assertEqual(kwargs["doc_type"], sharepoint.DOC_TYPE_WIRE_ACH_INSTRUCTIONS)
         self.assertEqual(kwargs["section"], sharepoint.SECTION_RECEIVING_BANKING)
+        mock_retag.assert_called_once()
 
     def test_29_rfi_additional_attachment_upload_unchanged(self):
         with self.client.session_transaction() as sess:

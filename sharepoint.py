@@ -414,3 +414,38 @@ def list_attachments(request_id):
             "uploaded_date":    item.get("createdDateTime", ""),
         })
     return results
+
+
+def retag_validation_evidence(request_id, new_doc_type):
+    """
+    Correct the AVS Screenshot vs. Validation Evidence DocumentType tag on an
+    ALREADY-uploaded file in this request's folder, WITHOUT re-uploading any
+    content — never invents or duplicates an attachment.
+
+    The single intake "Validation Evidence" upload is tagged AVS Screenshot
+    vs. Validation Evidence based on AVS Score at the moment it's uploaded
+    (app.py's _validation_evidence_doc_type()). A Draft may upload this file
+    during an earlier Save Draft, before the AVS Score is known/finalized —
+    if the score later changes and the requester finalizes without
+    reselecting the same file (the UI never forces re-upload of an
+    already-stored attachment), the stored tag would otherwise go stale
+    relative to the FINAL submission's score. Called whenever the final
+    POST's validation-evidence slot has no newly selected file.
+
+    Returns True if an existing item's tag was changed, False if no such
+    item exists or it already matches `new_doc_type`.
+    """
+    for item in list_attachments(request_id):
+        if item["doc_type"] not in (DOC_TYPE_VALIDATION_EVIDENCE, DOC_TYPE_AVS_SCREENSHOT):
+            continue
+        if item["doc_type"] == new_doc_type:
+            return False
+        drive_id = get_drive_id()
+        resp = _graph_request(
+            "GET",
+            f"{GRAPH_BASE}/drives/{drive_id}/root:/{request_id}/{item['filename']}",
+        )
+        _set_item_fields(drive_id, resp.json()["id"], {FIELD_DOC_TYPE: new_doc_type})
+        return True
+    return False
+

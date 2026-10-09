@@ -15,6 +15,7 @@ Run:  python -m unittest test_intake_precheck -v
 """
 import io
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import patch
 
 import app as app_module
@@ -287,6 +288,67 @@ class FinalSubmissionRemainsAuthoritativeTests(unittest.TestCase):
         body = resp.get_data(as_text=True)
         self.assertIn("Payment Support", body)
         mock_insert.assert_not_called()
+
+
+class IntakeFormFailClosedMarkupTests(unittest.TestCase):
+    """
+    The actual network-failure/fail-closed branching lives in browser
+    JavaScript, which this Python suite cannot execute. These are the
+    strongest practical assertions available short of a browser automation
+    test: they pin down the exact rendered JS source so a regression (e.g.
+    someone reintroducing an unconditional form.submit()) is caught.
+
+    MANUAL UAT VERIFICATION required for the actual runtime behavior:
+      1. Successful precheck (no errors) -> real multipart submit proceeds normally.
+      2. Business validation failure (e.g. missing Payment Purpose) -> page
+         stays, entered values and selected files remain, Submit re-enabled.
+      3. Simulate a precheck network/server failure (e.g. DevTools "offline",
+         or temporarily blocking POST /intake/precheck) -> page stays, the
+         "We couldn't validate the request right now..." message appears,
+         entered values and selected files remain untouched, Submit re-enabled,
+         and clicking Submit again retries the precheck.
+      4. Save Draft (form_mode=draft) still submits immediately, unaffected.
+    """
+
+    def _get_intake_page(self):
+        client = app_module.app.test_client()
+        with client.session_transaction() as sess:
+            sess["role"] = "submitter"
+        with patch.object(app_module, "current_app_user",
+                           return_value={"user_key": 11, "display_name": "U", "email": ""}), \
+             patch.object(app_module.db, "get_user_list", return_value=[]), \
+             patch.object(app_module.db, "get_bank_accounts", return_value=[]):
+            resp = client.get("/intake")
+        return resp.get_data(as_text=True)
+
+    def test_fail_closed_message_present(self):
+        body = self._get_intake_page()
+        self.assertIn("We couldn't validate the request right now", body)
+        self.assertIn("Your information and selected files have", body)
+
+    def test_old_fail_open_behavior_is_gone(self):
+        body = self._get_intake_page()
+        self.assertNotIn("Fail open", body)
+
+    def test_submit_only_happens_after_precheck_passed_flag(self):
+        body = self._get_intake_page()
+        # precheckPassed starts false and is only set true in the success
+        # branch; the submit call is gated behind checking it first.
+        self.assertIn("let precheckPassed = false;", body)
+        self.assertIn("precheckPassed = true;", body)
+        self.assertIn("if (!precheckPassed) return;", body)
+
+    def test_submit_button_restored_in_finally_block(self):
+        body = self._get_intake_page()
+        self.assertIn("setSubmitBusy(form, false);", body)
+
+    def test_timeout_handling_present(self):
+        body = self._get_intake_page()
+        self.assertIn("AbortSignal.timeout", body)
+
+    def test_save_draft_bypass_unaffected(self):
+        body = self._get_intake_page()
+        self.assertIn("e.submitter.value !== 'submit'", body)
 
 
 if __name__ == "__main__":

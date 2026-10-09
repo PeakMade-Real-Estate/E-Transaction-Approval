@@ -11,6 +11,7 @@ Run:  python -m unittest test_draft -v
 """
 import io
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import MagicMock, patch
 
 import app as app_module

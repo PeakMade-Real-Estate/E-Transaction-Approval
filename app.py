@@ -308,6 +308,15 @@ def _upload_intake_attachments(request_id):
     role = current_roles_display()
     for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
         file_storage = request.files.get(field_name)
+        if field_key == "validation_evidence" and (not file_storage or not file_storage.filename):
+            # No new file selected this POST — correct any already-stored
+            # AVS Screenshot/Validation Evidence item's tag against the
+            # CURRENT avs_score rather than leaving it from an earlier save.
+            try:
+                sharepoint.retag_validation_evidence(request_id, _validation_evidence_doc_type(request.form))
+            except Exception:
+                app.logger.exception("Unable to retag Validation Evidence doc type for %s", request_id)
+            continue
         if not file_storage or not file_storage.filename:
             continue
         if field_key == "validation_evidence":
@@ -338,6 +347,15 @@ def _upload_required_intake_attachments(request_id):
     role = current_roles_display()
     for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
         file_storage = request.files.get(field_name)
+        if field_key == "validation_evidence" and (not file_storage or not file_storage.filename):
+            # No new file selected this POST — correct any already-stored
+            # AVS Screenshot/Validation Evidence item's tag against the
+            # CURRENT avs_score rather than leaving it from an earlier save.
+            try:
+                sharepoint.retag_validation_evidence(request_id, _validation_evidence_doc_type(request.form))
+            except Exception:
+                app.logger.exception("Unable to retag Validation Evidence doc type for %s", request_id)
+            continue
         if not file_storage or not file_storage.filename:
             continue
         if field_key == "validation_evidence":

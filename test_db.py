@@ -6,6 +6,7 @@ Run:  python -m unittest test_db -v
 """
 
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import MagicMock, patch
 
 import db

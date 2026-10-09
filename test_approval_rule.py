@@ -9,6 +9,7 @@ rule from SQL.
 Run:  python -m unittest test_approval_rule -v
 """
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import MagicMock, patch
 
 import db

@@ -15,6 +15,7 @@ import csv
 import io
 import re
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import patch
 
 import app as app_module

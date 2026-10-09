@@ -1,4 +1,5 @@
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 
 from flask import session
 

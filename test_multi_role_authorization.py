@@ -13,6 +13,7 @@ Run:  python -m unittest test_multi_role_authorization -v
 import base64
 import json
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import patch
 
 import app as app_module

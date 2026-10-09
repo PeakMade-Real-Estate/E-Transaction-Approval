@@ -14,7 +14,8 @@ Run:  python -m unittest test_avs_validation_evidence -v
 """
 import io
 import unittest
-from unittest.mock import patch
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
+from unittest.mock import MagicMock, patch
 
 import app as app_module
 import sharepoint
@@ -218,6 +219,107 @@ class VerificationChecklistIndicatorTests(ApproverDetailAvsVsAlternativeDisplayT
         record = self._fake_record(verbal_confirmed=False, external_source=True, internal_doc_not_used=True)
         body = self._get(record).get_data(as_text=True)
         self.assertIn("checklist-missing", body)
+
+
+class RetagValidationEvidenceTests(unittest.TestCase):
+    """
+    UAT fix: a Draft may upload the Validation Evidence file during an
+    earlier Save Draft, before the AVS Score is known — sharepoint.
+    retag_validation_evidence() corrects the stored DocumentType against the
+    FINAL avs_score WITHOUT re-uploading, so the detail page never shows
+    "Not Attached" for evidence that genuinely exists, just under the other tag.
+    """
+
+    def test_retags_existing_item_when_doc_type_differs(self):
+        with patch.object(sharepoint, "list_attachments",
+                           return_value=[{"doc_type": sharepoint.DOC_TYPE_VALIDATION_EVIDENCE,
+                                          "filename": "Validation Evidence - e.png"}]), \
+             patch.object(sharepoint, "get_drive_id", return_value="drive1"), \
+             patch.object(sharepoint, "_graph_request",
+                           return_value=MagicMock(json=lambda: {"id": "item1"})), \
+             patch.object(sharepoint, "_set_item_fields") as mock_set:
+            changed = sharepoint.retag_validation_evidence("TXN-2026-1", sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+        self.assertTrue(changed)
+        mock_set.assert_called_once_with("drive1", "item1", {sharepoint.FIELD_DOC_TYPE: sharepoint.DOC_TYPE_AVS_SCREENSHOT})
+
+    def test_no_op_when_already_correctly_tagged(self):
+        with patch.object(sharepoint, "list_attachments",
+                           return_value=[{"doc_type": sharepoint.DOC_TYPE_AVS_SCREENSHOT,
+                                          "filename": "AVS Screenshot - e.png"}]), \
+             patch.object(sharepoint, "_set_item_fields") as mock_set:
+            changed = sharepoint.retag_validation_evidence("TXN-2026-1", sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+        self.assertFalse(changed)
+        mock_set.assert_not_called()
+
+    def test_no_op_when_no_matching_item_exists(self):
+        with patch.object(sharepoint, "list_attachments",
+                           return_value=[{"doc_type": sharepoint.DOC_TYPE_PAYMENT_SUPPORT, "filename": "x.pdf"}]), \
+             patch.object(sharepoint, "_set_item_fields") as mock_set:
+            changed = sharepoint.retag_validation_evidence("TXN-2026-1", sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+        self.assertFalse(changed)
+        mock_set.assert_not_called()
+
+    def test_never_uploads_new_content(self):
+        # Retagging must only ever PATCH metadata — it must never call the
+        # upload/content-writing path (no duplicate attachment).
+        with patch.object(sharepoint, "list_attachments",
+                           return_value=[{"doc_type": sharepoint.DOC_TYPE_VALIDATION_EVIDENCE,
+                                          "filename": "Validation Evidence - e.png"}]), \
+             patch.object(sharepoint, "get_drive_id", return_value="drive1"), \
+             patch.object(sharepoint, "_graph_request",
+                           return_value=MagicMock(json=lambda: {"id": "item1"})), \
+             patch.object(sharepoint, "_set_item_fields"), \
+             patch.object(sharepoint, "_upload_bytes") as mock_upload_bytes:
+            sharepoint.retag_validation_evidence("TXN-2026-1", sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+        mock_upload_bytes.assert_not_called()
+
+
+class ValidationEvidenceRetagWiringTests(unittest.TestCase):
+    """app.py must call the retag — never a fresh upload — when the
+    Validation Evidence slot has no newly selected file this POST."""
+
+    def test_no_new_file_triggers_retag_not_reupload(self):
+        with app_module.app.test_request_context(
+            "/intake/submit", method="POST",
+            data={"avs_score": "95"},  # no file_validation_evidence re-selected
+            content_type="multipart/form-data",
+        ):
+            with patch.object(app_module, "sharepoint_enabled", return_value=True), \
+                 patch.object(app_module, "current_roles_display", return_value="Submitter"), \
+                 patch.object(app_module.sharepoint, "retag_validation_evidence") as mock_retag, \
+                 patch.object(app_module.sharepoint, "upload_attachment") as mock_upload:
+                app_module._upload_intake_attachments("TXN-2026-0010")
+        mock_retag.assert_called_once_with("TXN-2026-0010", sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+        uploaded_doc_types = {c.kwargs.get("doc_type") for c in mock_upload.call_args_list}
+        self.assertNotIn(sharepoint.DOC_TYPE_AVS_SCREENSHOT, uploaded_doc_types)
+        self.assertNotIn(sharepoint.DOC_TYPE_VALIDATION_EVIDENCE, uploaded_doc_types)
+
+    def test_new_file_present_skips_retag_and_uploads_normally(self):
+        with app_module.app.test_request_context(
+            "/intake/submit", method="POST",
+            data={"avs_score": "95", "file_validation_evidence": (io.BytesIO(b"x"), "e.png")},
+            content_type="multipart/form-data",
+        ):
+            with patch.object(app_module, "sharepoint_enabled", return_value=True), \
+                 patch.object(app_module, "current_roles_display", return_value="Submitter"), \
+                 patch.object(app_module.sharepoint, "retag_validation_evidence") as mock_retag, \
+                 patch.object(app_module.sharepoint, "upload_attachment") as mock_upload:
+                app_module._upload_intake_attachments("TXN-2026-0011")
+        mock_retag.assert_not_called()
+        mock_upload.assert_called_once()
+        self.assertEqual(mock_upload.call_args.kwargs["doc_type"], sharepoint.DOC_TYPE_AVS_SCREENSHOT)
+
+    def test_retag_failure_is_best_effort_and_does_not_raise(self):
+        with app_module.app.test_request_context(
+            "/intake/submit", method="POST",
+            data={"avs_score": "95"},
+            content_type="multipart/form-data",
+        ):
+            with patch.object(app_module, "sharepoint_enabled", return_value=True), \
+                 patch.object(app_module, "current_roles_display", return_value="Submitter"), \
+                 patch.object(app_module.sharepoint, "retag_validation_evidence",
+                               side_effect=RuntimeError("Graph error")):
+                app_module._upload_intake_attachments("TXN-2026-0012")  # must not raise
 
 
 if __name__ == "__main__":

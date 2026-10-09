@@ -1198,10 +1198,14 @@
             method: 'POST',
             headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken },
             body: collectPrecheckFormData(form).toString(),
+            signal: AbortSignal.timeout(10000),
         });
+        if (!resp.ok) throw new Error('Precheck request failed with status ' + resp.status);
         const data = await resp.json();
-        if (!data.success) throw new Error(data.reason || 'Precheck failed');
-        return (data.errors || []).map(msg => ({ msg, section: null }));
+        if (!data || data.success !== true || !Array.isArray(data.errors)) {
+            throw new Error((data && data.reason) || 'Precheck returned an unexpected response');
+        }
+        return data.errors.map(msg => ({ msg, section: null }));
     }
 
     function setSubmitBusy(form, busy) {
@@ -1235,21 +1239,34 @@
         const form = e.target;
         precheckInFlight = true;
         setSubmitBusy(form, true);
+        let precheckPassed = false;
         try {
             const serverErrors = await runServerPrecheck(form);
             if (serverErrors.length) {
                 renderValidationErrors(serverErrors);
-                return;
+            } else {
+                renderValidationErrors([]);
+                precheckPassed = true;
             }
-            renderValidationErrors([]);
         } catch (networkErr) {
-            // Fail open — the final POST's own server-side validation remains
-            // authoritative regardless, so a transient precheck failure must
-            // never block a legitimate submission outright.
+            // Fail CLOSED — the precheck REQUEST ITSELF failed (network error,
+            // timeout, non-2xx HTTP status, or a malformed/unexpected response
+            // body), as opposed to the server successfully returning business-
+            // rule validation errors. Never submit on an unconfirmed precheck:
+            // the requester stays on this page with every entered value and
+            // selected file untouched, and may simply click Submit again.
+            renderValidationErrors([{
+                msg: "We couldn't validate the request right now. Your information and selected files have " +
+                     "been preserved. Please try submitting again.",
+                section: null,
+            }]);
         } finally {
             precheckInFlight = false;
             setSubmitBusy(form, false);
         }
+
+        if (!precheckPassed) return;
+
         // form.submit() bypasses the 'submit' event entirely (avoiding
         // re-entering this handler) but also skips the clicked button's own
         // name/value pair — restore form_mode=submit explicitly so the

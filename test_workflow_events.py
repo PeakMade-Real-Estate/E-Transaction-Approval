@@ -10,6 +10,7 @@ CONTROLLER_ASSIGNED, VP_ASSIGNED, CFO_ASSIGNED, READY_FOR_TREASURY).
 Run:  python -m unittest test_workflow_events -v
 """
 import unittest
+import external_guard  # noqa: F401  (must precede app/db/sharepoint imports)
 from unittest.mock import MagicMock, patch
 
 import db
