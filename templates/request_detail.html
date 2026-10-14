@@ -335,6 +335,22 @@
             <div class="card-body small">
                 <div class="row g-3">
                     <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Recipient Type</span>
+                        <div>
+                            {% if record.recipient_mode == 'internal' %}
+                            <span class="badge bg-info text-dark" id="recipient-type-badge">Internal Company Account</span>
+                            {% else %}
+                            <span class="badge bg-secondary" id="recipient-type-badge">External Payee</span>
+                            {% endif %}
+                        </div>
+                    </div>
+                    {% if record.recipient_mode == 'internal' and record.recipient_entity_name %}
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Recipient Entity / Property</span>
+                        <div id="recipient-entity-name">{{ record.recipient_entity_name }}{% if record.recipient_classification %} <span class="text-muted">({{ record.recipient_classification }})</span>{% endif %}</div>
+                    </div>
+                    {% endif %}
+                    <div class="col-sm-6 col-md-4">
                         <span class="section-label">Recipient / Payee Name</span>
                         <div class="fw-semibold">{{ record.recv_payee_name or '—' }}</div>
                     </div>
@@ -415,6 +431,8 @@
                                 {% else %}
                                 <span class="text-success fw-semibold small">{{ attachments.wire_ach_instructions }}</span>
                                 {% endif %}
+                                {% elif record.external_instructions_not_required %}
+                                <span class="text-muted small" id="external-instructions-not-required">Not required &mdash; internal account transfer.</span>
                                 {% else %}
                                 <span class="badge bg-danger">Missing</span>
                                 {% endif %}

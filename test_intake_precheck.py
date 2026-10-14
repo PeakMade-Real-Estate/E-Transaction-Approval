@@ -180,6 +180,7 @@ class PrecheckDraftParityTests(unittest.TestCase):
                            return_value={"approval_rule_key": 7, "requires_approver": True,
                                          "requires_controller": True, "requires_vp": False, "requires_cfo": False}), \
              patch.object(app_module.db, "get_draft_beneficiary_instruction_key", return_value=77), \
+             patch.object(app_module.db, "get_draft_recipient_bank_account_key", return_value=(True, None)), \
              patch.object(app_module.db, "get_beneficiary_instruction_sensitive_field",
                            side_effect=lambda bi_key, column: (
                                "99988877" if column == "Receiving_Account_Number" else "026009593"

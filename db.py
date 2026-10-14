@@ -936,6 +936,12 @@ SELECT
     v.Last_Used_Date                               AS last_used_date,
     v.Prior_Transaction_Key                         AS prior_transaction_key,
     priorTxn.Request_ID                             AS prior_request_id,
+    t.RecipientBankAccount_Key                      AS recipient_bank_account_key,
+    t.OriginatingBankAccount_Key                    AS originating_bank_account_key,
+    ba.Status                                       AS originating_bank_account_status,
+    rba.Status                                      AS recipient_bank_account_status,
+    ISNULL(rbe.Property_Department_Name, '')        AS recipient_entity_name,
+    ISNULL(rbe.Classification, '')                  AS recipient_classification,
     ISNULL(be.Classification, '')                   AS entity_classification,
     t.CurrentOwner_User_Key                         AS current_owner_user_key,
     t.BankReleaser_User_Key                          AS bank_releaser_user_key
@@ -956,6 +962,10 @@ LEFT JOIN [etransactions].[TransactionVerification] v
       ON v.Transaction_Key = t.Transaction_Key
 LEFT JOIN [etransactions].[ETransaction] priorTxn
       ON priorTxn.Transaction_Key = v.Prior_Transaction_Key
+LEFT JOIN [etransactions].[BankAccount] rba
+      ON rba.BankAccount_Key = t.RecipientBankAccount_Key
+LEFT JOIN [etransactions].[BusinessEntity] rbe
+      ON rbe.Entity_Key = rba.Entity_Key
 LEFT JOIN [etransactions].[BusinessEntity] be
       ON be.Entity_Key = t.Entity_Key
 WHERE t.Request_ID = ?
@@ -1063,6 +1073,9 @@ def get_request_detail(request_id: str):
     known = d.pop("_verbal_known_contact", False)
     req   = d.pop("_verbal_requester", False)
     d["verbal_confirmed_with"] = "Known Contact" if known else ("Requester" if req else "")
+
+    # Recipient type is derived ONLY from the persisted maintained-account reference.
+    d["recipient_mode"] = "internal" if d.get("recipient_bank_account_key") else "external"
 
     d["current_workflow_owner"] = d.get("assigned_approver") or ""
     d["notes_recv"]        = ""   # not yet stored per-instruction
@@ -1218,7 +1231,12 @@ def find_prior_completed_beneficiary_match(*, payee_name, receiving_bank_name,
 
 
 def get_bank_accounts():
-    """Return all active company bank accounts for the originating-account dropdown."""
+    """
+    Return all Open company bank accounts for the originating-account dropdown
+    AND the internal-recipient picker — safe identification only (bank, title,
+    last 4, entity/property name, classification); never a full account or
+    routing number.
+    """
     conn = get_connection()
     try:
         cur = conn.cursor()
@@ -1228,9 +1246,11 @@ def get_bank_accounts():
         # "xxxx" instead — so the last-4 digits are sliced here in Python from the raw
         # (still masked-but-partially-visible) value SQL Server returns, not in the query.
         cur.execute(
-            "SELECT BankAccount_Key, BankName, AccountTitle, AccountNumber "
-            "FROM [etransactions].[BankAccount] "
-            "WHERE Status = 'Open' ORDER BY AccountTitle"
+            "SELECT ba.BankAccount_Key, ba.BankName, ba.AccountTitle, ba.AccountNumber, "
+            "       ISNULL(be.Property_Department_Name, ''), ISNULL(be.Classification, '') "
+            "FROM [etransactions].[BankAccount] ba "
+            "LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = ba.Entity_Key "
+            "WHERE ba.Status = 'Open' ORDER BY ba.AccountTitle"
         )
         return [
             {
@@ -1238,6 +1258,8 @@ def get_bank_accounts():
                 "bank_name": r[1],
                 "account_title": r[2],
                 "account_last4": (r[3] or "")[-4:],
+                "entity_name": r[4],
+                "classification": r[5],
             }
             for r in cur.fetchall()
         ]
@@ -1631,6 +1653,147 @@ def get_draft_beneficiary_instruction_key(transaction_key: int, prepared_by_user
         conn.close()
 
 
+class InternalRecipientError(Exception):
+    """The selected maintained internal recipient BankAccount cannot be used for a
+    transaction snapshot (missing, closed, same as originator, or its banking
+    values cannot be read as real values). Messages are safe to show the requester."""
+
+
+def _load_internal_recipient_snapshot(cur, recipient_bank_account_key, originating_bank_account_key=None, *, require_routing=False):
+    """
+    Read the CURRENT real banking values of a maintained BankAccount, server-side
+    only, on the caller's cursor (so it is part of the caller's transaction), to
+    copy into a transaction-specific Beneficiary/BeneficiaryBankInstruction
+    snapshot. Raises InternalRecipientError unless the account exists, is Open,
+    is not the originating account, and its account/routing values are REAL —
+    a DDM-masked placeholder (e.g. "XXXX-XXXX-0123") is never accepted, so one can
+    never be stored as if it were the genuine instructions.
+
+    Returns {"bank_name", "account_name", "account_number", "routing_number",
+    "address"}. The values never leave the server (never rendered/returned to a browser).
+    """
+    try:
+        key = int(recipient_bank_account_key)
+    except (TypeError, ValueError):
+        raise InternalRecipientError("The selected recipient bank account is invalid.")
+    if originating_bank_account_key not in (None, "") and key == int(originating_bank_account_key):
+        raise InternalRecipientError("The recipient bank account cannot be the same as the originating bank account.")
+
+    cur.execute(
+        "SELECT BankName, AccountTitle, AccountNameID, SystemAccountName, "
+        "       AccountNumber, RoutingNumber, Address, Status "
+        "FROM [etransactions].[BankAccount] WHERE BankAccount_Key = ?",
+        [key],
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise InternalRecipientError("The selected recipient bank account could not be found.")
+    bank_name, title, name_id, system_name, account_number, routing_number, address, status = row
+    if status != "Open":
+        raise InternalRecipientError("The selected recipient bank account is closed and cannot be used.")
+    account_number = (account_number or "").strip()
+    routing_number = (routing_number or "").strip()
+    if (not account_number or banking_security.is_mask_placeholder(account_number)
+            or (routing_number and banking_security.is_mask_placeholder(routing_number))):
+        raise InternalRecipientError(
+            "The selected recipient account's banking details could not be read securely. "
+            "Contact an administrator."
+        )
+    if require_routing and not routing_number:
+        raise InternalRecipientError(
+            "The selected recipient account has no routing number on file; an ACH requires one. "
+            "Contact Treasury to complete the account record."
+        )
+    return {
+        "bank_name":      (bank_name or "").strip(),
+        "account_name":   (title or name_id or system_name or "").strip(),
+        "account_number": account_number,
+        "routing_number": routing_number,
+        "address":        (address or "").strip(),
+    }
+
+
+def get_internal_recipient_summary(bank_account_key):
+    """
+    Safe, non-sensitive summary of a maintained BankAccount for validating/
+    displaying an internal-recipient selection: None if it doesn't exist.
+    Never returns the account/routing numbers — `snapshot_ready` only reports
+    whether real (non-masked) values are readable server-side.
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT ba.BankAccount_Key, ba.BankName, ba.AccountTitle, ba.AccountNameID, "
+            "       ba.AccountNumber, ba.RoutingNumber, ba.Status, "
+            "       ISNULL(be.Property_Department_Name, ''), ISNULL(be.Classification, '') "
+            "FROM [etransactions].[BankAccount] ba "
+            "LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = ba.Entity_Key "
+            "WHERE ba.BankAccount_Key = ?",
+            [bank_account_key],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        key, bank_name, title, name_id, account_number, routing_number, status, entity_name, classification = row
+        account_number = (account_number or "").strip()
+        routing_number = (routing_number or "").strip()
+        snapshot_ready = bool(
+            account_number and not banking_security.is_mask_placeholder(account_number)
+            and not (routing_number and banking_security.is_mask_placeholder(routing_number))
+        )
+        return {
+            "bank_account_key": key,
+            "bank_name": bank_name or "",
+            "account_title": title or name_id or "",
+            "routing_present": bool(routing_number),
+            "last4": account_number[-4:] if snapshot_ready else "",
+            "status": status,
+            "entity_name": entity_name,
+            "classification": classification,
+            "snapshot_ready": snapshot_ready,
+        }
+    finally:
+        conn.close()
+
+
+def get_internal_recipient_instruction_values(bank_account_key):
+    """
+    Server-side only: the real bank name/account/routing of an Open maintained
+    BankAccount, for prior-use exact matching of an internal recipient (the
+    values are compared inside SQL and never sent to a browser). Raises
+    InternalRecipientError if the account can't be used.
+    """
+    conn = get_connection()
+    try:
+        return _load_internal_recipient_snapshot(conn.cursor(), bank_account_key)
+    finally:
+        conn.close()
+
+
+def get_draft_recipient_bank_account_key(transaction_key, prepared_by_user_key):
+    """
+    Return (found, recipient_bank_account_key) for a Draft owned by
+    `prepared_by_user_key`: found is False if it doesn't exist/isn't owned/isn't
+    still a Draft; the key is None for an external recipient. Lets the app tell
+    whether a blank receiving account/routing field means "keep the stored
+    EXTERNAL value" or must be re-entered (a Draft switching internal -> external
+    must never silently keep the internal snapshot's account number).
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT RecipientBankAccount_Key FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        return (False, None) if row is None else (True, row[0])
+    finally:
+        conn.close()
+
+
 def get_transaction_banking_keys(request_id: str):
     """
     Return {"originating_bank_account_key", "beneficiary_instruction_key"} for a
@@ -1908,6 +2071,22 @@ def insert_transaction(data: dict) -> str:
     try:
         cur = conn.cursor()
 
+        # Internal recipient: the banking instructions are a transaction-time
+        # SNAPSHOT of the maintained BankAccount, read server-side inside this
+        # transaction (Open status re-checked, masked placeholders rejected).
+        # External recipient: the requester's entered values, exactly as before.
+        recipient_key = data.get("recipient_bank_account_key") or None
+        if recipient_key:
+            snap = _load_internal_recipient_snapshot(
+                cur, recipient_key, data.get("bank_account_key"), require_routing=data["request_type"] == "ACH")
+            recv_bank_name, recv_account_name = snap["bank_name"], snap["account_name"]
+            recv_account_number, recv_routing_number = snap["account_number"], snap["routing_number"]
+            recv_bank_address = snap["address"]
+        else:
+            recv_bank_name, recv_account_name = data["recv_bank_name"], data["recv_account_name"]
+            recv_account_number, recv_routing_number = data["recv_account_number"], data["recv_routing_number"]
+            recv_bank_address = data.get("recv_bank_address", "")
+
         # Insert Beneficiary (payee)
         cur.execute(
             "INSERT INTO [etransactions].[Beneficiary] "
@@ -1925,9 +2104,9 @@ def insert_transaction(data: dict) -> str:
             " Receiving_Account_Number, Receiving_Routing_Number, "
             " Bank_Beneficiary_Address, Is_Current, Effective_From) "
             "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            [ben_key, data["recv_bank_name"], data["recv_account_name"],
-             data["recv_account_number"], data["recv_routing_number"],
-             data.get("recv_bank_address", ""), today],
+            [ben_key, recv_bank_name, recv_account_name,
+             recv_account_number, recv_routing_number,
+             recv_bank_address, today],
         )
         bi_key = cur.fetchone()[0]
 
@@ -1952,7 +2131,8 @@ def insert_transaction(data: dict) -> str:
             "INSERT INTO [etransactions].[ETransaction] ("
             "  Request_ID, PreparedBy_User_Key,"
             "  Entity_Key, Property_Department_Text, Entity_ID_Text,"
-            "  OriginatingBankAccount_Key, Beneficiary_Key, BeneficiaryInstruction_Key,"
+            "  OriginatingBankAccount_Key, RecipientBankAccount_Key,"
+            "  Beneficiary_Key, BeneficiaryInstruction_Key,"
             "  SelectedApprover_User_Key, SelectedController_User_Key,"
             "  VPApprover_User_Key, CFOApprover_User_Key,"
             "  CurrentOwner_User_Key, BankReleaser_User_Key, ApprovalRule_Key,"
@@ -1963,7 +2143,7 @@ def insert_transaction(data: dict) -> str:
             "  Approval_Tier_Snapshot, Requires_VP, Requires_CFO,"
             "  Created_DateTime, Modified_DateTime"
             ") OUTPUT INSERTED.Transaction_Key"
-            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 request_id,
                 data["prepared_by_key"],
@@ -1971,6 +2151,7 @@ def insert_transaction(data: dict) -> str:
                 data.get("property_dept", ""),
                 data.get("property_code", ""),
                 data["bank_account_key"],
+                recipient_key,
                 ben_key,
                 bi_key,
                 data["approver_key"],
@@ -2151,6 +2332,20 @@ def create_draft(data: dict):
     try:
         cur = conn.cursor()
 
+        # Internal recipient: snapshot the maintained BankAccount now (the Draft's
+        # NOT NULL Beneficiary/Instruction rows need real values); finalize
+        # re-reads the account and refreshes this snapshot before submission.
+        recipient_key = data.get("recipient_bank_account_key") or None
+        if recipient_key:
+            snap = _load_internal_recipient_snapshot(cur, recipient_key, data.get("bank_account_key"))
+            recv_bank_name, recv_account_name = snap["bank_name"], snap["account_name"]
+            recv_account_number, recv_routing_number = snap["account_number"], snap["routing_number"]
+            recv_bank_address = snap["address"]
+        else:
+            recv_bank_name, recv_account_name = data["recv_bank_name"], data.get("recv_account_name", "")
+            recv_account_number, recv_routing_number = data["recv_account_number"], data.get("recv_routing_number", "")
+            recv_bank_address = data.get("recv_bank_address", "")
+
         cur.execute(
             "INSERT INTO [etransactions].[Beneficiary] "
             "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
@@ -2166,9 +2361,9 @@ def create_draft(data: dict):
             " Receiving_Account_Number, Receiving_Routing_Number, "
             " Bank_Beneficiary_Address, Is_Current, Effective_From) "
             "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            [ben_key, data["recv_bank_name"], data.get("recv_account_name", ""),
-             data["recv_account_number"], data.get("recv_routing_number", ""),
-             data.get("recv_bank_address", ""), today],
+            [ben_key, recv_bank_name, recv_account_name,
+             recv_account_number, recv_routing_number,
+             recv_bank_address, today],
         )
         bi_key = cur.fetchone()[0]
 
@@ -2178,7 +2373,8 @@ def create_draft(data: dict):
             "INSERT INTO [etransactions].[ETransaction] ("
             "  Request_ID, PreparedBy_User_Key,"
             "  Entity_Key, Property_Department_Text, Entity_ID_Text,"
-            "  OriginatingBankAccount_Key, Beneficiary_Key, BeneficiaryInstruction_Key,"
+            "  OriginatingBankAccount_Key, RecipientBankAccount_Key,"
+            "  Beneficiary_Key, BeneficiaryInstruction_Key,"
             "  SelectedApprover_User_Key, SelectedController_User_Key,"
             "  CurrentOwner_User_Key,"
             "  Request_Type, Treasury_Service_Date, Prepared_Date,"
@@ -2188,11 +2384,11 @@ def create_draft(data: dict):
             "  Requires_VP, Requires_CFO,"
             "  Created_DateTime, Modified_DateTime"
             ") OUTPUT INSERTED.Transaction_Key"
-            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             [
                 request_id, data["prepared_by_key"],
                 entity_key, data.get("property_dept", ""), data.get("property_code", ""),
-                data["bank_account_key"], ben_key, bi_key,
+                data["bank_account_key"], recipient_key, ben_key, bi_key,
                 data["approver_key"], data["controller_key"],
                 data["prepared_by_key"],  # requester owns the actionable work while drafting
                 data["request_type"], data["treasury_service_date"], today,
@@ -2264,16 +2460,29 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
              data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
         )
 
-        bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
-        bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
-        # Blank account/routing number means "keep the existing stored value" —
-        # never overwrite a real value with a blank/placeholder (Batch 3 principle).
-        if (data.get("recv_account_number") or "").strip():
-            bi_set.append("Receiving_Account_Number = ?")
-            bi_params.append(data["recv_account_number"])
-        if (data.get("recv_routing_number") or "").strip():
-            bi_set.append("Receiving_Routing_Number = ?")
-            bi_params.append(data["recv_routing_number"])
+        recipient_key = data.get("recipient_bank_account_key") or None
+        if recipient_key:
+            # Internal recipient: always refresh the whole snapshot from the
+            # maintained account (never "keep existing") — also covers a Draft
+            # switching from an external to an internal recipient.
+            snap = _load_internal_recipient_snapshot(cur, recipient_key, data.get("bank_account_key"))
+            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
+                      "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
+            bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
+                         snap["account_number"], snap["routing_number"]]
+        else:
+            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+            bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+            # Blank account/routing number means "keep the existing stored value" —
+            # never overwrite a real value with a blank/placeholder (Batch 3 principle).
+            # app.py never lets a blank through for a Draft that was previously an
+            # INTERNAL recipient (its stored values are a snapshot, not the requester's).
+            if (data.get("recv_account_number") or "").strip():
+                bi_set.append("Receiving_Account_Number = ?")
+                bi_params.append(data["recv_account_number"])
+            if (data.get("recv_routing_number") or "").strip():
+                bi_set.append("Receiving_Routing_Number = ?")
+                bi_params.append(data["recv_routing_number"])
         bi_params.append(bi_key)
         cur.execute(
             f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
@@ -2285,7 +2494,8 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
             "UPDATE [etransactions].[ETransaction] SET"
             "  Property_Department_Text = ?, Entity_ID_Text = ?,"
             + ("  Entity_Key = ?," if classification else "")
-            + "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
+            + "  OriginatingBankAccount_Key = ?, RecipientBankAccount_Key = ?,"
+            "  SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?,"
             "  Amount = ?, Currency = ?, Payment_Purpose = ?,"
             "  Urgent_Flag = ?, Urgency_Reason = ?, Modified_DateTime = ?"
@@ -2293,7 +2503,7 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
             [
                 data.get("property_dept", ""), data.get("property_code", ""),
                 *([entity_key] if classification else []),
-                data["bank_account_key"], data["approver_key"], data["controller_key"],
+                data["bank_account_key"], recipient_key, data["approver_key"], data["controller_key"],
                 data["request_type"], data["treasury_service_date"],
                 data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
                 1 if data.get("urgent") else 0, data.get("urgency_reason", ""), now,
@@ -2329,7 +2539,8 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
         cur.execute(
             """
             SELECT t.Transaction_Key, t.Request_ID, t.Property_Department_Text, t.Entity_ID_Text,
-                   t.OriginatingBankAccount_Key, t.SelectedApprover_User_Key, t.SelectedController_User_Key,
+                   t.OriginatingBankAccount_Key, t.RecipientBankAccount_Key,
+                   t.SelectedApprover_User_Key, t.SelectedController_User_Key,
                    t.Request_Type, t.Treasury_Service_Date, t.Amount, t.Currency, t.Payment_Purpose,
                    t.Urgent_Flag, t.Urgency_Reason, t.Prepared_Date,
                    b.Payee_Name, b.Contact_Name, b.Contact_Email, b.Contact_Phone,
@@ -2381,6 +2592,11 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
         "recv_account_number_masked": banking_security.mask_account_number(d["Receiving_Account_Number"] or ""),
         "recv_routing_number_masked": banking_security.mask_routing_number(d["Receiving_Routing_Number"] or ""),
         "originating_bank_account": _draft_originating_bank_account_summary(d["OriginatingBankAccount_Key"]),
+        "recipient_bank_account_key": d["RecipientBankAccount_Key"],
+        "recipient_mode": "internal" if d["RecipientBankAccount_Key"] else "external",
+        "recipient_account": (
+            get_internal_recipient_summary(d["RecipientBankAccount_Key"]) if d["RecipientBankAccount_Key"] else None
+        ),
     }
 
 
@@ -2465,14 +2681,29 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             [data["recv_payee_name"], data.get("recv_contact_name", ""),
              data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
         )
-        bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
-        bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
-        if (data.get("recv_account_number") or "").strip():
-            bi_set.append("Receiving_Account_Number = ?")
-            bi_params.append(data["recv_account_number"])
-        if (data.get("recv_routing_number") or "").strip():
-            bi_set.append("Receiving_Routing_Number = ?")
-            bi_params.append(data["recv_routing_number"])
+
+        recipient_key = data.get("recipient_bank_account_key") or None
+        if recipient_key:
+            # Internal recipient: re-read the CURRENT maintained account inside
+            # this transaction (Open status re-validated, real values only) and
+            # make it the final snapshot. After this commit nothing ever updates
+            # these rows again (both draft writers are guarded by Current_Status='Draft'),
+            # so later BankAccount edits cannot change the historical instructions.
+            snap = _load_internal_recipient_snapshot(
+                cur, recipient_key, data.get("bank_account_key"), require_routing=data["request_type"] == "ACH")
+            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
+                      "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
+            bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
+                         snap["account_number"], snap["routing_number"]]
+        else:
+            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+            bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+            if (data.get("recv_account_number") or "").strip():
+                bi_set.append("Receiving_Account_Number = ?")
+                bi_params.append(data["recv_account_number"])
+            if (data.get("recv_routing_number") or "").strip():
+                bi_set.append("Receiving_Routing_Number = ?")
+                bi_params.append(data["recv_routing_number"])
         bi_params.append(bi_key)
         cur.execute(
             f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
@@ -2483,7 +2714,8 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
         cur.execute(
             "UPDATE [etransactions].[ETransaction] SET"
             "  Property_Department_Text = ?, Entity_ID_Text = ?, Entity_Key = ?,"
-            "  OriginatingBankAccount_Key = ?, SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
+            "  OriginatingBankAccount_Key = ?, RecipientBankAccount_Key = ?,"
+            "  SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  CurrentOwner_User_Key = ?, ApprovalRule_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?, Submitted_Date = ?,"
             "  Amount = ?, Currency = ?, Payment_Purpose = ?,"
@@ -2494,7 +2726,7 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
             [
                 data.get("property_dept", ""), data.get("property_code", ""), entity_key,
-                data["bank_account_key"], data["approver_key"], data["controller_key"],
+                data["bank_account_key"], recipient_key, data["approver_key"], data["controller_key"],
                 data["approver_key"], data["approval_rule_key"],
                 data["request_type"], data["treasury_service_date"], now,
                 data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),

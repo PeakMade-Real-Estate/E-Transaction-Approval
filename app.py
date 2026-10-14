@@ -523,7 +523,140 @@ def _intake_property_fields(frm):
     }
 
 
-def _validate_intake_submission(frm, *, files_present: dict, bank_account_status, has_stored_receiving_bank_instruction=False, prepared_by_user_key=None):
+RECIPIENT_MODE_EXTERNAL = "external"
+RECIPIENT_MODE_INTERNAL = "internal"
+# A maintained internal BankAccount may be the recipient only for these request
+# types; Wire, ACH Pull and EFT keep their existing external-recipient behavior.
+INTERNAL_RECIPIENT_REQUEST_TYPES = ("ACH", "Intra Bank Transfer")
+
+
+def _recipient_mode(frm):
+    """Submitted recipient mode, defaulting to External for compatibility."""
+    return (frm.get("recipient_mode") or "").strip().lower() or RECIPIENT_MODE_EXTERNAL
+
+
+def _load_recipient_summary(frm):
+    """
+    db.get_internal_recipient_summary() for the submitted recipient key, ONLY in
+    internal mode (None otherwise, or if the key is not numeric/not found/the
+    lookup fails). The key is the single thing trusted from the browser, and only
+    as a lookup handle: status, existence and readability are re-derived here.
+    """
+    if _recipient_mode(frm) != RECIPIENT_MODE_INTERNAL:
+        return None
+    try:
+        key = int((frm.get("recipient_bank_account_key") or "").strip())
+    except ValueError:
+        return None
+    try:
+        return db.get_internal_recipient_summary(key)
+    except Exception:
+        app.logger.exception("Unable to look up the selected recipient bank account")
+        return None
+
+
+def _validate_recipient_selection(frm, recipient_summary):
+    """
+    Shared recipient-mode validation for the final submission, /intake/precheck
+    and Save Draft — one rule set so they cannot drift. Pure (the caller supplies
+    `recipient_summary`). Payee-name presence is checked by each caller.
+
+    External (default): an injected recipient_bank_account_key is rejected.
+    Internal: ACH / Intra Bank Transfer only; a numeric key that resolves to an
+    existing, Open maintained BankAccount whose banking values are readable as
+    real (non-masked) values server-side; and not the originating account.
+    """
+    mode = _recipient_mode(frm)
+    raw_key = (frm.get("recipient_bank_account_key") or "").strip()
+
+    if mode not in (RECIPIENT_MODE_EXTERNAL, RECIPIENT_MODE_INTERNAL):
+        return ["Recipient type is invalid."]
+    if mode == RECIPIENT_MODE_EXTERNAL:
+        if raw_key:
+            return ["A maintained internal bank account cannot be combined with an external recipient."]
+        return []
+
+    errors = []
+    request_type = (frm.get("request_type") or "").strip()
+    if request_type and request_type not in INTERNAL_RECIPIENT_REQUEST_TYPES:
+        errors.append("A maintained internal bank account can only be the recipient of an ACH or Intra Bank Transfer request.")
+    if not raw_key:
+        errors.append("Select a maintained internal bank account as the recipient.")
+        return errors
+    try:
+        key = int(raw_key)
+    except ValueError:
+        errors.append("The selected recipient bank account is invalid.")
+        return errors
+
+    if recipient_summary is None or recipient_summary.get("bank_account_key") != key:
+        errors.append("The selected recipient bank account could not be found.")
+    elif recipient_summary.get("status") != "Open":
+        errors.append("The selected recipient bank account is closed and cannot be used.")
+    elif not recipient_summary.get("snapshot_ready"):
+        errors.append(
+            "The selected recipient account's banking details could not be read securely. "
+            "Contact an administrator."
+        )
+    originating_raw = (frm.get("bank_account_key") or "").strip()
+    if originating_raw.isdigit() and int(originating_raw) == key:
+        errors.append("The recipient bank account cannot be the same as the originating bank account.")
+    return errors
+
+
+def _has_stored_external_instruction(frm, draft_transaction_key_raw, prepared_by_user_key):
+    """
+    True when a blank receiving account/routing number may legitimately mean "keep
+    the stored value": the Draft exists and its stored instruction belongs to an
+    EXTERNAL recipient. If the Draft currently holds an INTERNAL snapshot, a
+    Draft switching to an external recipient must re-enter the numbers — the
+    internal snapshot's values are never silently carried into an external
+    instruction. When nothing is blank the answer doesn't matter (no DB call).
+    """
+    if not draft_transaction_key_raw:
+        return False
+    if (frm.get("recv_account_number") or "").strip() and (frm.get("recv_routing_number") or "").strip():
+        return True
+    try:
+        found, recipient_key = db.get_draft_recipient_bank_account_key(
+            int(draft_transaction_key_raw), prepared_by_user_key
+        )
+    except Exception:
+        app.logger.exception("Unable to read the Draft's stored recipient type")
+        return False
+    return bool(found) and recipient_key is None
+
+
+def _recipient_key_for_persistence(frm):
+    """The recipient key to persist: the validated integer in internal mode, else None."""
+    if _recipient_mode(frm) != RECIPIENT_MODE_INTERNAL:
+        return None
+    try:
+        return int((frm.get("recipient_bank_account_key") or "").strip())
+    except ValueError:
+        return None
+
+
+def external_instructions_exempt(*, request_type, originating_key, originating_status,
+                                 recipient_key, recipient_status, require_open=True):
+    """
+    The single approved exception to the External ACH/Wire Instructions attachment:
+    an ACH between two DIFFERENT maintained BankAccounts. Pure — callers supply
+    keys/statuses read from the database, never browser claims. Wire, ACH Pull,
+    EFT and Intra Bank Transfer are deliberately not exempt.
+    `require_open=False` is only for displaying an already-submitted transaction,
+    whose accounts may have been closed since submission.
+    """
+    try:
+        originating, recipient = int(originating_key), int(recipient_key)
+    except (TypeError, ValueError):
+        return False
+    if (request_type or "").strip() != "ACH" or originating == recipient:
+        return False
+    return not require_open or (originating_status == "Open" and recipient_status == "Open")
+
+
+def _validate_intake_submission(frm, *, files_present: dict, bank_account_status, has_stored_receiving_bank_instruction=False, prepared_by_user_key=None, recipient_summary=None):
     """
     Authoritative SERVER-SIDE validation for /intake/submit — mirrors the
     client-side checks already in intake.html so a direct POST (bypassing
@@ -534,6 +667,9 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     BankAccount.Status value already looked up by the caller (None if the
     supplied key doesn't exist), and `files_present` is a dict of the three
     named required attachment fields to booleans (was a real file selected).
+    `recipient_summary` is db.get_internal_recipient_summary() for the submitted
+    internal-recipient key (None if not looked up / not found) — see
+    _validate_recipient_selection().
     `prepared_by_user_key`, if supplied, rejects selecting the requester as
     their own Approver/Controller (segregation of duties) — the intake
     dropdowns already exclude the current user, this is the server-side
@@ -592,24 +728,42 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
 
     # D. Receiving / beneficiary bank information
     require("recv_payee_name", "Recipient / Payee Name")
-    require("recv_bank_name", "Receiving Bank Name")
-    require("recv_account_name", "Receiving Account Name")
-    # Batch 8: a blank account/routing number is only acceptable when finalizing
-    # an existing Draft that already has a real stored value — the intake form
-    # never re-displays the raw DDM-masked value as editable (Batch 3), so
-    # "blank" there means "keep the stored value", not "no value at all". A
-    # brand-new submission (has_stored_receiving_bank_instruction=False) still
-    # requires both fields exactly as before.
-    if not has_stored_receiving_bank_instruction:
-        require("recv_account_number", "Receiving Account Number")
-        require("recv_routing_number", "Receiving Routing Number")
-    if frm.get("request_type") == "Wire" and not (frm.get("recv_bank_address") or "").strip():
-        errors.append("Receiving Bank / Beneficiary Address is required for Wire transactions.")
+    recipient_mode = _recipient_mode(frm)
+    recipient_errors = _validate_recipient_selection(frm, recipient_summary)
+    errors.extend(recipient_errors)
+    instructions_exempt = False
+    if recipient_mode == RECIPIENT_MODE_INTERNAL and not recipient_errors and recipient_summary:
+        # Same routing requirement an external ACH already has (recv_routing_number is
+        # required below for every external recipient); not imposed on other types.
+        if (frm.get("request_type") or "").strip() == "ACH" and not recipient_summary.get("routing_present"):
+            errors.append(
+                "The selected recipient account has no routing number on file; an ACH requires one. "
+                "Contact Treasury to complete the account record."
+            )
+        instructions_exempt = external_instructions_exempt(
+            request_type=frm.get("request_type"),
+            originating_key=frm.get("bank_account_key"), originating_status=bank_account_status,
+            recipient_key=recipient_summary.get("bank_account_key"), recipient_status=recipient_summary.get("status"),
+        )
+    if recipient_mode != RECIPIENT_MODE_INTERNAL:
+        require("recv_bank_name", "Receiving Bank Name")
+        require("recv_account_name", "Receiving Account Name")
+        # Batch 8: a blank account/routing number is only acceptable when finalizing
+        # an existing Draft that already has a real stored value — the intake form
+        # never re-displays the raw DDM-masked value as editable (Batch 3), so
+        # "blank" there means "keep the stored value", not "no value at all". A
+        # brand-new submission (has_stored_receiving_bank_instruction=False) still
+        # requires both fields exactly as before.
+        if not has_stored_receiving_bank_instruction:
+            require("recv_account_number", "Receiving Account Number")
+            require("recv_routing_number", "Receiving Routing Number")
+        if frm.get("request_type") == "Wire" and not (frm.get("recv_bank_address") or "").strip():
+            errors.append("Receiving Bank / Beneficiary Address is required for Wire transactions.")
 
     # E/F. Required attachments (mirrors intake.html validateAttachments())
     if not files_present.get("validation_evidence"):
         errors.append("Validation Evidence attachment is required.")
-    if not files_present.get("wire_ach_instructions"):
+    if not files_present.get("wire_ach_instructions") and not instructions_exempt:
         errors.append("External ACH/Wire Instructions attachment is required.")
     if not files_present.get("payment_support"):
         errors.append("Payment Support attachment is required.")
@@ -662,6 +816,29 @@ def _resolve_prior_use_match(frm, *, draft_transaction_key_raw, prepared_by_user
     Never raises — fails safe to None (treated as "no match found", the
     stricter outcome) on any lookup error.
     """
+    if _recipient_mode(frm) == RECIPIENT_MODE_INTERNAL:
+        # Internal recipient: the browser never holds the real account/routing
+        # numbers (only the BankAccount key), so the match is made against the
+        # values re-read server-side from the master account — never against
+        # blank/placeholder form fields. The values are used only for this
+        # in-process lookup and are never returned to the client.
+        recipient_key = _recipient_key_for_persistence(frm)
+        if recipient_key is None:
+            return None
+        try:
+            values = db.get_internal_recipient_instruction_values(recipient_key)
+            if not values:
+                return None
+            return db.find_prior_completed_beneficiary_match(
+                payee_name=frm.get("recv_payee_name", ""),
+                receiving_bank_name=values["bank_name"],
+                receiving_account_number=values["account_number"],
+                receiving_routing_number=values["routing_number"],
+            )
+        except Exception:
+            app.logger.exception("Unable to check prior beneficiary instruction history for an internal recipient")
+            return None
+
     match_account_number = frm.get("recv_account_number", "")
     match_routing_number = frm.get("recv_routing_number", "")
     try:
@@ -753,7 +930,7 @@ def _evaluate_prior_use_claim(frm, prior_match):
 _DRAFT_ALLOWED_REQUEST_TYPES = ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT')
 
 
-def _validate_draft_submission(frm, *, is_update=False):
+def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
     """
     Light DATA-VALIDITY-only validation for Save Draft (Batch 8) — deliberately
     NOT _validate_intake_submission() (Batch 1's full business-completeness
@@ -781,9 +958,11 @@ def _validate_draft_submission(frm, *, is_update=False):
     require("controller_key", "Controller")
     require("bank_account_key", "Originating Bank Account")
     require("recv_payee_name", "Recipient / Payee Name")
-    require("recv_bank_name", "Receiving Bank Name")
-    if not is_update:
-        require("recv_account_number", "Receiving Account Number")
+    errors.extend(_validate_recipient_selection(frm, recipient_summary))
+    if _recipient_mode(frm) != RECIPIENT_MODE_INTERNAL:
+        require("recv_bank_name", "Receiving Bank Name")
+        if not is_update:
+            require("recv_account_number", "Receiving Account Number")
 
     # Property/Corporate is allowed to stay unset while drafting (Entity_Key
     # is nullable on ETransaction) — but a PARTIAL choice (Property selected
@@ -1232,6 +1411,22 @@ def _draft_files_present(request_id):
     return _resolve_files_present(request_id, newly_selected=newly_selected)
 
 
+def _render_intake_form_again(prepared_by_user, errors):
+    """Re-render intake.html with the usual picker lists after a server-side rejection."""
+    users, bank_accounts = [], []
+    approver_users, controller_users = [], []
+    try:
+        users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
+        approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
+        controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
+        bank_accounts     = db.get_bank_accounts()
+    except Exception:
+        pass
+    return render_template("intake.html", users=users, approver_users=approver_users,
+                            controller_users=controller_users, bank_accounts=bank_accounts,
+                            prepared_by_user=prepared_by_user, errors=errors)
+
+
 def _handle_save_draft(frm, prepared_by_user):
     """
     Save Draft (Batch 8) — light data-validity-only validation, never the full
@@ -1240,7 +1435,12 @@ def _handle_save_draft(frm, prepared_by_user):
     row). No workflow/WorkflowEvent is started — see db.create_draft()/update_draft().
     """
     draft_transaction_key_raw = frm.get("transaction_key", "").strip()
-    errors = _validate_draft_submission(frm, is_update=bool(draft_transaction_key_raw))
+    errors = _validate_draft_submission(
+        frm,
+        is_update=_has_stored_external_instruction(
+            frm, draft_transaction_key_raw, prepared_by_user["user_key"]),
+        recipient_summary=_load_recipient_summary(frm),
+    )
 
     bank_account_key_raw = frm.get("bank_account_key", "").strip()
     if bank_account_key_raw and not errors:
@@ -1293,6 +1493,7 @@ def _handle_save_draft(frm, prepared_by_user):
         "bank_account_key": int(bank_account_key_raw),
         "approver_key":     int(frm.get("approver_key")),
         "controller_key":   int(frm.get("controller_key")),
+        "recipient_bank_account_key": _recipient_key_for_persistence(frm),
         "recv_payee_name":    frm.get("recv_payee_name", "").strip(),
         "recv_contact_name":  frm.get("recv_contact_name", ""),
         "recv_contact_email": frm.get("recv_contact_email", ""),
@@ -1317,6 +1518,11 @@ def _handle_save_draft(frm, prepared_by_user):
     except db.DraftNotEditableError:
         flash("This draft is no longer editable (it may have already been submitted).", "danger")
         return redirect(url_for("dashboard"))
+    except db.InternalRecipientError as exc:
+        flash(str(exc), "warning")
+        return render_template("intake.html", users=users, approver_users=approver_users,
+                                controller_users=controller_users, bank_accounts=bank_accounts,
+                                prepared_by_user=prepared_by_user, errors=[str(exc)])
     except Exception:
         app.logger.exception("Draft save failed")
         flash("Unable to save this draft. Please try again.", "danger")
@@ -1615,10 +1821,13 @@ def intake_submit():
             except Exception:
                 bank_account_status = None
 
+        recipient_summary = _load_recipient_summary(frm)
         errors = _validate_intake_submission(
             frm, files_present=files_present, bank_account_status=bank_account_status,
-            has_stored_receiving_bank_instruction=bool(draft_transaction_key_raw),
+            has_stored_receiving_bank_instruction=_has_stored_external_instruction(
+                frm, draft_transaction_key_raw, prepared_by_user["user_key"]),
             prepared_by_user_key=prepared_by_user["user_key"],
+            recipient_summary=recipient_summary,
         )
 
         if not errors:
@@ -1704,6 +1913,7 @@ def intake_submit():
                     "avs_score":             frm.get("avs_score", ""),
                     "external_source":       frm.get("external_source") == "on",
                     "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
+                    "recipient_bank_account_key": _recipient_key_for_persistence(frm),
                     "recv_payee_name":       frm.get("recv_payee_name", "").strip(),
                     "recv_bank_name":        frm.get("recv_bank_name", "").strip(),
                     "recv_account_name":     frm.get("recv_account_name", ""),
@@ -1727,6 +1937,13 @@ def intake_submit():
             except db.WorkflowConflictError:
                 flash("This draft has already been submitted or is no longer available.", "info")
                 return redirect(url_for("dashboard"))
+            except db.InternalRecipientError as exc:
+                # Re-validation at finalize time found the maintained recipient
+                # account unusable (e.g. closed since the draft was saved). The
+                # transaction rolled back; the Draft is unchanged. The message
+                # never contains banking values.
+                flash(str(exc), "warning")
+                return _render_intake_form_again(prepared_by_user, errors=[str(exc)])
             except Exception:
                 app.logger.exception("Draft finalization failed for transaction_key=%s", draft_transaction_key_raw)
                 flash("Unable to submit this request. Please try again.", "danger")
@@ -1782,6 +1999,7 @@ def intake_submit():
                 "avs_score":             frm.get("avs_score", ""),
                 "external_source":       frm.get("external_source") == "on",
                 "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
+                "recipient_bank_account_key": _recipient_key_for_persistence(frm),
                 "recv_payee_name":       frm.get("recv_payee_name", "").strip(),
                 "recv_bank_name":        frm.get("recv_bank_name", "").strip(),
                 "recv_account_name":     frm.get("recv_account_name", ""),
@@ -1812,6 +2030,11 @@ def intake_submit():
             return render_template("intake.html", users=users, approver_users=approver_users,
                                     controller_users=controller_users, bank_accounts=bank_accounts,
                                     prepared_by_user=prepared_by_user, errors=[])
+        except db.InternalRecipientError as exc:
+            # The maintained recipient account became unusable between validation
+            # and the SQL transaction (e.g. closed). Nothing was committed.
+            flash(str(exc), "warning")
+            return _render_intake_form_again(prepared_by_user, errors=[str(exc)])
         except Exception:
             # Never echo the raw exception to the user — it can contain SQL error
             # text that references sensitive banking values (Part 14 safety rule).
@@ -1906,8 +2129,12 @@ def intake_precheck():
 
     errors = _validate_intake_submission(
         frm, files_present=files_present, bank_account_status=bank_account_status,
-        has_stored_receiving_bank_instruction=bool(draft_transaction_key_raw),
+        has_stored_receiving_bank_instruction=(
+            _has_stored_external_instruction(frm, draft_transaction_key_raw, prepared_by_user["user_key"])
+            if (_db_on and prepared_by_user is not None) else bool(draft_transaction_key_raw)
+        ),
         prepared_by_user_key=(prepared_by_user["user_key"] if prepared_by_user else None),
+        recipient_summary=(_load_recipient_summary(frm) if _db_on else None),
     )
 
     if not errors and _db_on:
@@ -2521,6 +2748,16 @@ def request_detail(request_id):
     display["recv_routing_number_masked"]  = banking_security.mask_routing_number(display.pop("recv_routing_number", ""))
 
     display["can_add_comment"] = from_sql
+
+    # Historical statuses aren't snapshotted, so only a Draft (not yet submitted) is held to "Open" now.
+    display["external_instructions_not_required"] = from_sql and external_instructions_exempt(
+        request_type=record.get("request_type"),
+        originating_key=record.get("originating_bank_account_key"),
+        originating_status=record.get("originating_bank_account_status"),
+        recipient_key=record.get("recipient_bank_account_key"),
+        recipient_status=record.get("recipient_bank_account_status"),
+        require_open=record.get("status") == workflow.STATUS_DRAFT,
+    )
 
     display["can_reassign"] = False
     display["reassignment_candidates"] = []

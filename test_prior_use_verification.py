@@ -179,6 +179,7 @@ class DraftFinalizeUsesRealStoredValueTests(unittest.TestCase):
              patch.object(app_module.db, "get_bank_account_status", return_value="Open"), \
              patch.object(app_module.db, "get_app_user_role_codes", return_value=["sam", "controller"]), \
              patch.object(app_module.db, "get_draft_beneficiary_instruction_key", return_value=77) as mock_bi_key, \
+             patch.object(app_module.db, "get_draft_recipient_bank_account_key", return_value=(True, None)), \
              patch.object(app_module.db, "get_beneficiary_instruction_sensitive_field") as mock_reveal, \
              patch.object(app_module.db, "find_prior_completed_beneficiary_match",
                            return_value={"transaction_key": 42, "request_id": "TXN-2026-001",

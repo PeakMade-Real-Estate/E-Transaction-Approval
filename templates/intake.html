@@ -518,14 +518,81 @@
                 </h2>
                 <div id="sectionD" class="accordion-collapse collapse show">
                     <div class="accordion-body pt-3">
+                        {% set recipient_mode_val = (draft.recipient_mode if draft else (request.form.get('recipient_mode') or 'external')) %}
+                        {% set recipient_key_val = (draft.recipient_bank_account_key if draft else request.form.get('recipient_bank_account_key', '')) %}
+                        {% set ext_numbers_required = (not draft) or (draft.recipient_mode == 'internal') %}
                         <div class="row g-3">
+                            {% if bank_accounts %}
+                            {# Recipient type. External is the default and unchanged. Internal selects a
+                               maintained company BankAccount: only its KEY is submitted — the server
+                               re-validates it (exists, Open, not the originating account) and builds the
+                               Beneficiary/instruction snapshot itself. No account/routing number is ever
+                               rendered into or sent from this page for an internal recipient. #}
+                            <div class="col-12">
+                                <label class="form-label fw-semibold d-block">Recipient Type <span class="text-danger">*</span></label>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="recipient_mode" id="recipient_mode_external"
+                                           value="external" {% if recipient_mode_val != 'internal' %}checked{% endif %}>
+                                    <label class="form-check-label" for="recipient_mode_external">External payee</label>
+                                </div>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="recipient_mode" id="recipient_mode_internal"
+                                           value="internal" {% if recipient_mode_val == 'internal' %}checked{% endif %}>
+                                    <label class="form-check-label" for="recipient_mode_internal">Internal company bank account</label>
+                                </div>
+                                <div id="recipient-mode-note" class="form-text text-warning fw-semibold" style="display:none;"></div>
+                            </div>
+                            {% endif %}
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_payee_name">
                                     Recipient / Payee Name <span class="text-danger">*</span>
                                 </label>
                                 <input type="text" class="form-control" id="recv_payee_name" value="{{ draft.recv_payee_name if draft else request.form.get('recv_payee_name', '') }}"
                                        name="recv_payee_name" placeholder="Legal payee name" required>
+                                <div id="internal-payee-note" class="form-text" style="display:none;">
+                                    Confirm the payee name for this internal transfer &mdash; it is not taken from the account record.
+                                </div>
                             </div>
+                            {% if bank_accounts %}
+                            <div class="col-12" id="internal-recipient-panel" style="display:none;">
+                                <label class="form-label fw-semibold" for="recipient_acct_last4">
+                                    Recipient Account &mdash; Last 4 Digits <span class="text-danger">*</span>
+                                </label>
+                                <div class="input-group">
+                                    <span class="input-group-text"><i class="fas fa-search"></i></span>
+                                    <input type="text" class="form-control" id="recipient_acct_last4"
+                                           inputmode="numeric" maxlength="4" placeholder="e.g. 1234"
+                                           autocomplete="off" oninput="filterRecipientAccounts(this.value)">
+                                </div>
+                                <div id="recipient-account-results" class="list-group mt-1" style="display:none;"></div>
+                                <div id="recipient-account-selected"
+                                     class="alert alert-success d-flex align-items-center justify-content-between py-2 mt-2 mb-0 d-none">
+                                    <span><i class="fas fa-check-circle me-2"></i><span id="recipient-account-selected-label"></span></span>
+                                    <button type="button" class="btn btn-sm btn-outline-success" onclick="clearRecipientSelection()">Change</button>
+                                </div>
+                                {% if draft and draft.recipient_account %}
+                                <div class="alert alert-info py-2 mt-2 mb-0 small" id="recipient-account-draft-summary">
+                                    <i class="fas fa-university me-1"></i>
+                                    Currently selected:
+                                    <strong>
+                                        {{ draft.recipient_account.bank_name }}{% if draft.recipient_account.account_title %} &mdash; {{ draft.recipient_account.account_title }}{% endif %}
+                                        {% if draft.recipient_account.last4 %}&bull;&bull;&bull;&bull; {{ draft.recipient_account.last4 }}{% endif %}
+                                    </strong>
+                                    {% if draft.recipient_account.entity_name %}<div class="text-muted">{{ draft.recipient_account.entity_name }}</div>{% endif %}
+                                    {% if draft.recipient_account.status != 'Open' %}<div class="text-danger fw-semibold">This account is now closed &mdash; choose another recipient account before submitting.</div>{% endif %}
+                                    <div class="text-muted">Search above only if you need to change it.</div>
+                                </div>
+                                {% endif %}
+                                <input type="hidden" name="recipient_bank_account_key" id="recipient_bank_account_key"
+                                       value="{{ recipient_key_val if recipient_mode_val == 'internal' and recipient_key_val else '' }}">
+                                <div class="form-text">
+                                    The system fills in this account's banking details securely when you save or submit.
+                                    Full account and routing numbers are never displayed here.
+                                </div>
+                            </div>
+                            {% endif %}
+                            <div class="col-12" id="external-recipient-fields">
+                              <div class="row g-3">
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_bank_name">
                                     Receiving Bank Name <span class="text-danger">*</span>
@@ -542,21 +609,21 @@
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_account_number">
-                                    Receiving Account Number {% if not draft %}<span class="text-danger">*</span>{% endif %}
+                                    Receiving Account Number {% if ext_numbers_required %}<span class="text-danger">*</span>{% endif %}
                                 </label>
                                 <input type="text" class="form-control" id="recv_account_number" value="{{ request.form.get('recv_account_number', '') }}"
-                                       name="recv_account_number" placeholder="{{ draft.recv_account_number_masked if draft else 'Enter account number' }}"
-                                       autocomplete="off" {% if not draft %}required{% endif %}>
-                                {% if draft %}<div class="form-text">Currently on file: {{ draft.recv_account_number_masked }}. Leave blank to keep it.</div>{% endif %}
+                                       name="recv_account_number" placeholder="{{ draft.recv_account_number_masked if draft and not ext_numbers_required else 'Enter account number' }}"
+                                       autocomplete="off" {% if ext_numbers_required %}required{% endif %}>
+                                {% if draft and not ext_numbers_required %}<div class="form-text">Currently on file: {{ draft.recv_account_number_masked }}. Leave blank to keep it.</div>{% endif %}
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label fw-semibold" for="recv_routing_number">
-                                    Receiving Routing Number {% if not draft %}<span class="text-danger">*</span>{% endif %}
+                                    Receiving Routing Number {% if ext_numbers_required %}<span class="text-danger">*</span>{% endif %}
                                 </label>
                                 <input type="text" class="form-control" id="recv_routing_number" value="{{ request.form.get('recv_routing_number', '') }}"
-                                       name="recv_routing_number" placeholder="{{ draft.recv_routing_number_masked if draft else 'Enter routing number' }}"
-                                       autocomplete="off" {% if not draft %}required{% endif %}>
-                                {% if draft %}<div class="form-text">Currently on file: {{ draft.recv_routing_number_masked }}. Leave blank to keep it.</div>{% endif %}
+                                       name="recv_routing_number" placeholder="{{ draft.recv_routing_number_masked if draft and not ext_numbers_required else 'Enter routing number' }}"
+                                       autocomplete="off" {% if ext_numbers_required %}required{% endif %}>
+                                {% if draft and not ext_numbers_required %}<div class="form-text">Currently on file: {{ draft.recv_routing_number_masked }}. Leave blank to keep it.</div>{% endif %}
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="recv_bank_address">
@@ -570,6 +637,8 @@
                                     <i class="fas fa-exclamation-circle me-1"></i>Required for Wire transactions.
                                 </div>
                             </div>
+                              </div>
+                            </div><!-- /external-recipient-fields -->
                             <div class="col-md-4">
                                 <label class="form-label" for="recv_contact_name">Recipient Contact Name</label>
                                 <input type="text" class="form-control" id="recv_contact_name" value="{{ draft.recv_contact_name if draft else request.form.get('recv_contact_name', '') }}"
@@ -594,7 +663,7 @@
                             <!-- External ACH/Wire Instructions Upload -->
                             <div class="col-12">
                                 <label class="form-label fw-semibold" for="file_wire_ach_instructions">
-                                    External ACH/Wire Instructions <span class="text-danger">*</span>
+                                    External ACH/Wire Instructions <span id="wire-instructions-required-star" class="text-danger">*</span>
                                 </label>
                                 <input type="file" class="form-control" id="file_wire_ach_instructions"
                                        name="file_wire_ach_instructions"
@@ -602,7 +671,10 @@
                                 {% if existing_attachments and existing_attachments.wire_ach_instructions %}
                                 <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.wire_ach_instructions }} (select a new file only to replace it)</div>
                                 {% endif %}
-                                <div class="form-text">Attach the ACH or wire instructions provided by the payee or their bank.</div>
+                                <div id="wire-instructions-exempt-note" class="alert alert-info py-2 mt-2 mb-0 small" style="display:none;">
+                                    External ACH/Wire Instructions: Not required for transfers between maintained internal accounts.
+                                </div>
+                                <div id="wire-instructions-help" class="form-text">Attach the ACH or wire instructions provided by the payee or their bank.</div>
                             </div>
 
                         </div>
@@ -1015,6 +1087,13 @@
         const acct   = (document.getElementById('recv_account_number')?.value || '').trim();
         const route  = (document.getElementById('recv_routing_number')?.value || '').trim();
         const txnKey = document.getElementById('transaction_key')?.value || '';
+        const internalMode = currentRecipientMode() === 'internal';
+        const recipientKey = document.getElementById('recipient_bank_account_key')?.value || '';
+        if (internalMode) {
+            // Internal recipient: the browser only knows the BankAccount key;
+            // the server resolves the real bank/account/routing for the match.
+            if (!payee || !recipientKey) { renderPriorUseMatchPanel('hidden'); return; }
+        } else
         // A brand-new (non-Draft) submission needs real account/routing text;
         // a Draft may leave them blank to mean "keep the stored value" — the
         // server resolves that case itself from the real stored value.
@@ -1034,6 +1113,10 @@
                 recv_account_number: acct, recv_routing_number: route,
                 transaction_key: txnKey,
             });
+            if (internalMode) {
+                body.set('recipient_mode', 'internal');
+                body.set('recipient_bank_account_key', recipientKey);
+            }
             const resp = await fetch('{{ url_for("intake_prior_use_check") }}', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-CSRFToken': csrfToken },
@@ -1076,6 +1159,70 @@
         if (addrNote)  addrNote.style.display = isWire ? 'block'  : 'none';
     }
 
+    // ── Recipient type: External (default) vs Internal maintained account ──
+    // Internal is offered for ACH and Intra Bank Transfer only. In internal
+    // mode the external bank/account/routing inputs are DISABLED, so the
+    // browser neither requires nor submits them — only the BankAccount key
+    // (recipient_bank_account_key) and the confirmed payee name are sent.
+    // This is UX only: the server re-validates everything.
+    const INTERNAL_RECIPIENT_TYPES = ['ACH', 'Intra Bank Transfer'];
+
+    function currentRecipientMode() {
+        return document.getElementById('recipient_mode_internal')?.checked ? 'internal' : 'external';
+    }
+
+    function applyRecipientMode() {
+        const internalRadio = document.getElementById('recipient_mode_internal');
+        const externalRadio = document.getElementById('recipient_mode_external');
+        if (!internalRadio || !externalRadio) return;  // internal picker unavailable (no bank accounts loaded)
+        const reqType = document.getElementById('request_type')?.value || '';
+        const note = document.getElementById('recipient-mode-note');
+        const typeAllowed = !reqType || INTERNAL_RECIPIENT_TYPES.includes(reqType);
+
+        if (!typeAllowed && internalRadio.checked) {
+            externalRadio.checked = true;
+            if (typeof clearRecipientSelection === 'function') clearRecipientSelection();
+            if (note) {
+                note.textContent = 'An internal company account can only be the recipient of an ACH or Intra Bank Transfer request; switched back to External payee.';
+                note.style.display = 'block';
+            }
+        } else if (note && typeAllowed) {
+            note.style.display = 'none';
+        }
+        internalRadio.disabled = !typeAllowed;
+
+        const internal = internalRadio.checked;
+        const panel = document.getElementById('internal-recipient-panel');
+        const ext = document.getElementById('external-recipient-fields');
+        const payeeNote = document.getElementById('internal-payee-note');
+        if (panel) panel.style.display = internal ? 'block' : 'none';
+        if (payeeNote) payeeNote.style.display = internal ? 'block' : 'none';
+        if (ext) {
+            ext.style.display = internal ? 'none' : '';
+            ext.querySelectorAll('input, select, textarea').forEach(el => { el.disabled = internal; });
+        }
+        const keyEl = document.getElementById('recipient_bank_account_key');
+        if (keyEl) keyEl.disabled = !internal;  // never submit a recipient key in external mode
+        updateInstructionsRequirement();
+    }
+
+    // UX mirror of the server's external_instructions_exempt() rule (ACH between two different
+    // selected maintained accounts); the server re-derives it from the database on every precheck/submit.
+    function updateInstructionsRequirement() {
+        const reqType = document.getElementById('request_type')?.value || '';
+        const recipientKey = document.getElementById('recipient_bank_account_key')?.value || '';
+        const originatingKey = document.getElementById('bank_account_key')?.value || '';
+        const exempt = reqType === 'ACH' && currentRecipientMode() === 'internal'
+            && !!recipientKey && !!originatingKey && recipientKey !== originatingKey;
+        const star = document.getElementById('wire-instructions-required-star');
+        const note = document.getElementById('wire-instructions-exempt-note');
+        const help = document.getElementById('wire-instructions-help');
+        if (star) star.style.display = exempt ? 'none' : '';
+        if (note) note.style.display = exempt ? 'block' : 'none';
+        if (help) help.style.display = exempt ? 'none' : '';
+        return exempt;
+    }
+
     // ── Pre-submit validation: fast client-only structural checks ──
     // Pure — returns an array of {msg, section}; never touches the DOM or
     // navigates. Conditional BUSINESS rules (approver eligibility, prior-use,
@@ -1101,6 +1248,15 @@
         if (bankKeyEl && !bankKeyEl.value)
             errors.push({ msg: '<strong>Originating Bank Account</strong> — type the last 4 digits and select an account.', section: 'sectionC' });
 
+        // Section D — Internal recipient (maintained company account) must be selected
+        if (currentRecipientMode() === 'internal') {
+            const recipientKeyEl = document.getElementById('recipient_bank_account_key');
+            if (recipientKeyEl && !recipientKeyEl.value)
+                errors.push({ msg: '<strong>Recipient Account</strong> — type the last 4 digits and select an internal company bank account.', section: 'sectionD' });
+            else if (recipientKeyEl && bankKeyEl && recipientKeyEl.value === bankKeyEl.value)
+                errors.push({ msg: 'The <strong>recipient account</strong> cannot be the same as the originating account.', section: 'sectionD' });
+        }
+
         // Section B — Validation Evidence
         const valEv = document.getElementById('file_validation_evidence');
         if (valEv && !valEv.files.length)
@@ -1108,7 +1264,7 @@
 
         // Section D — External ACH/Wire Instructions
         const wireInstr = document.getElementById('file_wire_ach_instructions');
-        if (wireInstr && !wireInstr.files.length)
+        if (wireInstr && !wireInstr.files.length && !updateInstructionsRequirement())
             errors.push({ msg: '<strong>External ACH/Wire Instructions</strong> must be attached.', section: 'sectionD' });
 
         // Section D — Beneficiary address required for Wire
@@ -1316,8 +1472,14 @@
         const reqTypeEl = document.getElementById('request_type');
         if (reqTypeEl) {
             reqTypeEl.addEventListener('change', onRequestTypeWireCheck);
+            reqTypeEl.addEventListener('change', applyRecipientMode);
             onRequestTypeWireCheck();
         }
+
+        // Recipient type (External default / Internal maintained account)
+        document.querySelectorAll('input[name="recipient_mode"]').forEach(r =>
+            r.addEventListener('change', function () { applyRecipientMode(); schedulePriorUseCheck(); }));
+        applyRecipientMode();
 
         // Pre-submit validation
         const form = document.getElementById('intake-form');
@@ -1367,7 +1529,90 @@
             bank + ' — ' + title + ' (…' + last4 + ')';
         document.getElementById('bank-account-selected').classList.remove('d-none');
         document.getElementById('acct_last4').disabled = true;
+        updateInstructionsRequirement();
     }
+
+    // ── Internal recipient picker (maintained company BankAccount) ─────
+    // BANK_ACCOUNTS carries only safe identification (bank, title, last 4,
+    // entity/property). Selecting stores the BankAccount KEY only; the
+    // server builds the instruction snapshot and never sends account or
+    // routing numbers to the browser.
+    function filterRecipientAccounts(val) {
+        const resultsEl = document.getElementById('recipient-account-results');
+        resultsEl.innerHTML = '';
+        if (val.length < 4) { resultsEl.style.display = 'none'; return; }
+        const originatingKey = document.getElementById('bank_account_key')?.value || '';
+        const matches = BANK_ACCOUNTS.filter(a => a.account_last4 === val
+            && String(a.bank_account_key) !== String(originatingKey));
+        if (!matches.length) {
+            resultsEl.innerHTML = `<div class="list-group-item text-muted">No eligible accounts found ending in ${escHtml(val)}</div>`;
+        } else {
+            resultsEl.innerHTML = matches.map(a =>
+                `<button type="button" class="list-group-item list-group-item-action"
+                    data-key="${a.bank_account_key}"
+                    onclick="selectRecipientAccount(this)">
+                    <strong>${escHtml(a.bank_name || '')}</strong> &mdash; ${escHtml(a.account_title || '')}
+                    <span class="text-muted ms-1">&hellip;${escHtml(a.account_last4)}</span>
+                    ${a.entity_name ? `<div class="small text-muted">${escHtml(a.entity_name)}</div>` : ''}
+                </button>`
+            ).join('');
+        }
+        resultsEl.style.display = 'block';
+    }
+
+    function selectRecipientAccount(btn) {
+        const acct = BANK_ACCOUNTS.find(a => String(a.bank_account_key) === String(btn.dataset.key));
+        if (acct) applyRecipientSelection(acct, true);
+    }
+
+    function applyRecipientSelection(acct, userInitiated) {
+        document.getElementById('recipient_bank_account_key').value = acct.bank_account_key;
+        document.getElementById('recipient-account-results').style.display = 'none';
+        document.getElementById('recipient-account-selected-label').textContent =
+            (acct.bank_name || '') + (acct.account_title ? ' — ' + acct.account_title : '') +
+            ' (…' + acct.account_last4 + ')' + (acct.entity_name ? ' · ' + acct.entity_name : '');
+        document.getElementById('recipient-account-selected').classList.remove('d-none');
+        document.getElementById('recipient_acct_last4').disabled = true;
+        const draftSummary = document.getElementById('recipient-account-draft-summary');
+        if (draftSummary) draftSummary.classList.add('d-none');
+        updateInstructionsRequirement();
+        if (userInitiated) {
+            // Convenience only: pre-fill the payee name from the account title when
+            // empty. The requester must confirm/edit it — the server never invents it.
+            const payeeEl = document.getElementById('recv_payee_name');
+            if (payeeEl && !payeeEl.value.trim() && acct.account_title) payeeEl.value = acct.account_title;
+            schedulePriorUseCheck();
+        }
+    }
+
+    function clearRecipientSelection() {
+        const keyEl = document.getElementById('recipient_bank_account_key');
+        if (!keyEl) return;
+        keyEl.value = '';
+        document.getElementById('recipient-account-selected').classList.add('d-none');
+        const last4 = document.getElementById('recipient_acct_last4');
+        last4.disabled = false;
+        last4.value = '';
+        const results = document.getElementById('recipient-account-results');
+        results.style.display = 'none';
+        results.innerHTML = '';
+        const draftSummary = document.getElementById('recipient-account-draft-summary');
+        if (draftSummary) draftSummary.classList.add('d-none');
+        updateInstructionsRequirement();
+        schedulePriorUseCheck();
+    }
+
+    // Restore the friendly selected-account label after a validation-error
+    // re-render (the hidden key survives via request.form; a resumed Draft
+    // gets its own server-rendered summary instead).
+    document.addEventListener('DOMContentLoaded', function () {
+        const keyEl = document.getElementById('recipient_bank_account_key');
+        const hasDraftSummary = !!document.getElementById('recipient-account-draft-summary');
+        if (keyEl && keyEl.value && !hasDraftSummary) {
+            const acct = BANK_ACCOUNTS.find(a => String(a.bank_account_key) === String(keyEl.value));
+            if (acct) applyRecipientSelection(acct, false);
+        }
+    });
 
     function clearBankSelection() {
         document.getElementById('bank_account_key').value        = '';
@@ -1379,6 +1624,7 @@
         last4.value = '';
         document.getElementById('bank-account-results').style.display = 'none';
         document.getElementById('bank-account-results').innerHTML = '';
+        updateInstructionsRequirement();
     }
 
     {% if not draft %}
