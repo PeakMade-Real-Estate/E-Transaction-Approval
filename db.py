@@ -2292,6 +2292,72 @@ _DRAFT_REQUIRED_FIELDS = (
 )
 
 
+def _verification_values(data: dict) -> list:
+    """TransactionVerification column values (in table order after Transaction_Key) from caller data."""
+    return [
+        1 if data.get("instructions_previously_used") else 0,
+        data.get("last_used_date") or None,
+        data.get("prior_transaction_key") or None,
+        1 if data.get("verbal_confirmed") else 0,
+        1 if data.get("verbal_known_contact") else 0,
+        1 if data.get("verbal_requester") else 0,
+        data.get("verbal_contact_name", ""),
+        data.get("verbal_confirm_datetime") or None,
+        data.get("avs_score") or None,
+        1 if data.get("external_source") else 0,
+        1 if data.get("internal_doc_not_used") else 0,
+    ]
+
+
+def _upsert_transaction_verification(cur, transaction_key, data: dict, user_key, now) -> None:
+    """
+    Keep exactly ONE TransactionVerification row per transaction on the caller's cursor:
+    update the existing row (a Draft may already have one) and insert only when none
+    exists yet. A Draft row is simply the saved-so-far verification state; finalize
+    overwrites it with the validated final values.
+    """
+    values = _verification_values(data)
+    cur.execute(
+        "UPDATE [etransactions].[TransactionVerification] SET"
+        "  Instructions_Previously_Used = ?, Last_Used_Date = ?, Prior_Transaction_Key = ?,"
+        "  Verbal_Confirmed = ?, Confirmed_With_KnownContact_Flag = ?, Confirmed_With_Requester_Flag = ?,"
+        "  Verbal_Contact_Name = ?, Verbal_Confirm_DateTime = ?,"
+        "  AVS_Score = ?, External_Source_Flag = ?, Internal_Doc_Not_Used_Flag = ?,"
+        "  Verified_By_User_Key = ?"
+        " WHERE Transaction_Key = ?",
+        [*values, user_key, transaction_key],
+    )
+    cur.execute(
+        "IF NOT EXISTS (SELECT 1 FROM [etransactions].[TransactionVerification] WHERE Transaction_Key = ?) "
+        "INSERT INTO [etransactions].[TransactionVerification] ("
+        "  Transaction_Key,"
+        "  Instructions_Previously_Used, Last_Used_Date, Prior_Transaction_Key,"
+        "  Verbal_Confirmed,"
+        "  Confirmed_With_KnownContact_Flag, Confirmed_With_Requester_Flag,"
+        "  Verbal_Contact_Name, Verbal_Confirm_DateTime,"
+        "  AVS_Score, External_Source_Flag, Internal_Doc_Not_Used_Flag,"
+        "  Verified_By_User_Key, Created_DateTime"
+        ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [transaction_key, transaction_key, *values, user_key, now],
+    )
+
+
+def get_draft_request_id(transaction_key, prepared_by_user_key):
+    """Request_ID of a Draft owned by prepared_by_user_key, or None (missing / not owned / not a Draft)."""
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT Request_ID FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
+
 def create_draft(data: dict):
     """
     Create a new Draft transaction (Batch 8) — persists only what the requester
@@ -2400,6 +2466,10 @@ def create_draft(data: dict):
             ],
         )
         txn_key = cur.fetchone()[0]
+
+        # Verification entered so far travels with the Draft (no workflow side effects).
+        if "instructions_previously_used" in data:
+            _upsert_transaction_verification(cur, txn_key, data, data["prepared_by_key"], now)
 
         conn.commit()
         return request_id, txn_key
@@ -2514,6 +2584,9 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
             conn.rollback()
             raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
 
+        if "instructions_previously_used" in data:
+            _upsert_transaction_verification(cur, transaction_key, data, prepared_by_user_key, now)
+
         conn.commit()
     except DraftNotEditableError:
         raise
@@ -2522,6 +2595,13 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
         raise
     finally:
         conn.close()
+
+
+def _avs_score_text(value) -> str:
+    """AVS_Score (decimal) as the whole-number text the intake input uses; blank when not entered."""
+    if value is None:
+        return ""
+    return str(int(value)) if value == int(value) else str(value)
 
 
 def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
@@ -2546,11 +2626,17 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
                    b.Payee_Name, b.Contact_Name, b.Contact_Email, b.Contact_Phone,
                    bi.Receiving_Bank_Name, bi.Receiving_Account_Name,
                    bi.Receiving_Account_Number, bi.Receiving_Routing_Number, bi.Bank_Beneficiary_Address,
-                   be.Classification, be.Entity_ID
+                   be.Classification, be.Entity_ID,
+                   v.Instructions_Previously_Used, v.Last_Used_Date, priorTxn.Request_ID AS Prior_Request_ID,
+                   v.Verbal_Confirmed, v.Confirmed_With_KnownContact_Flag, v.Confirmed_With_Requester_Flag,
+                   v.Verbal_Contact_Name, v.Verbal_Confirm_DateTime, v.AVS_Score,
+                   v.External_Source_Flag, v.Internal_Doc_Not_Used_Flag
             FROM [etransactions].[ETransaction] t
             JOIN [etransactions].[Beneficiary] b ON b.Beneficiary_Key = t.Beneficiary_Key
             JOIN [etransactions].[BeneficiaryBankInstruction] bi ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
             LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = t.Entity_Key
+            LEFT JOIN [etransactions].[TransactionVerification] v ON v.Transaction_Key = t.Transaction_Key
+            LEFT JOIN [etransactions].[ETransaction] priorTxn ON priorTxn.Transaction_Key = v.Prior_Transaction_Key
             WHERE t.Transaction_Key = ? AND t.PreparedBy_User_Key = ? AND t.Current_Status = ?
             """,
             [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
@@ -2597,6 +2683,20 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
         "recipient_account": (
             get_internal_recipient_summary(d["RecipientBankAccount_Key"]) if d["RecipientBankAccount_Key"] else None
         ),
+        # Verification entered so far, in the formats the intake form's inputs use.
+        "instructions_previously_used": bool(d["Instructions_Previously_Used"]),
+        "last_used_date":   d["Last_Used_Date"].strftime("%Y-%m-%d") if d["Last_Used_Date"] else "",
+        "prior_request_id": d["Prior_Request_ID"] or "",
+        "verbal_confirmed": bool(d["Verbal_Confirmed"]),
+        "verbal_known_contact": bool(d["Confirmed_With_KnownContact_Flag"]),
+        "verbal_requester": bool(d["Confirmed_With_Requester_Flag"]),
+        "verbal_contact_name": d["Verbal_Contact_Name"] or "",
+        "verbal_confirm_datetime": (
+            d["Verbal_Confirm_DateTime"].strftime("%Y-%m-%dT%H:%M") if d["Verbal_Confirm_DateTime"] else ""
+        ),
+        "avs_score":        _avs_score_text(d["AVS_Score"]),
+        "external_source":  bool(d["External_Source_Flag"]),
+        "internal_doc_not_used": bool(d["Internal_Doc_Not_Used_Flag"]),
     }
 
 
@@ -2636,7 +2736,8 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
          succeeds finds Current_Status no longer 'Draft' and raises
          WorkflowConflictError, same optimistic-concurrency pattern as
          advance_transaction_workflow()).
-      3. Insert TransactionVerification (first time — a Draft never has one).
+      3. Write TransactionVerification (updates the Draft's saved verification row,
+         or inserts one if the Draft never had one — always exactly one row).
       4. Insert the initial "Approver" WorkflowAssignment.
       5. Insert WorkflowEvent rows: Submitted, APPROVER_ASSIGNED (Batch 6
          contract, unchanged — no DRAFT_SAVED event exists or is needed).
@@ -2743,33 +2844,7 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
                 "This draft could not be found, is not yours, or has already been submitted."
             )
 
-        cur.execute(
-            "INSERT INTO [etransactions].[TransactionVerification] ("
-            "  Transaction_Key,"
-            "  Instructions_Previously_Used, Last_Used_Date, Prior_Transaction_Key,"
-            "  Verbal_Confirmed,"
-            "  Confirmed_With_KnownContact_Flag, Confirmed_With_Requester_Flag,"
-            "  Verbal_Contact_Name, Verbal_Confirm_DateTime,"
-            "  AVS_Score, External_Source_Flag, Internal_Doc_Not_Used_Flag,"
-            "  Verified_By_User_Key, Created_DateTime"
-            ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            [
-                transaction_key,
-                1 if data.get("instructions_previously_used") else 0,
-                data.get("last_used_date") or None,
-                data.get("prior_transaction_key") or None,
-                1 if data.get("verbal_confirmed") else 0,
-                1 if data.get("verbal_known_contact") else 0,
-                1 if data.get("verbal_requester") else 0,
-                data.get("verbal_contact_name", ""),
-                data.get("verbal_confirm_datetime") or None,
-                data.get("avs_score") or None,
-                1 if data.get("external_source") else 0,
-                1 if data.get("internal_doc_not_used") else 0,
-                prepared_by_user_key,
-                now,
-            ],
-        )
+        _upsert_transaction_verification(cur, transaction_key, data, prepared_by_user_key, now)
 
         cur.execute(
             "INSERT INTO [etransactions].[WorkflowAssignment] ("

@@ -403,6 +403,7 @@ class SaveDraftRouteTests(unittest.TestCase):
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "create_draft") as mock_create, \
              patch.object(app_module.db, "update_draft") as mock_update:
             resp = self.client.post(
@@ -479,6 +480,7 @@ class FinalizeDraftRouteTests(unittest.TestCase):
                            return_value={"approval_rule_key": 7, "requires_approver": True,
                                          "requires_controller": True, "requires_vp": False, "requires_cfo": False}), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "finalize_draft_submission") as mock_finalize:
             data = dict(self._full_form())
             data.update(self._files())
@@ -499,6 +501,7 @@ class FinalizeDraftRouteTests(unittest.TestCase):
                            return_value={"approval_rule_key": 7, "requires_approver": True,
                                          "requires_controller": True, "requires_vp": False, "requires_cfo": False}), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "finalize_draft_submission", side_effect=db.WorkflowConflictError("already submitted")):
             data = dict(self._full_form())
             data.update(self._files())
@@ -712,6 +715,7 @@ class DraftBankAccountKeyPersistenceRouteTests(unittest.TestCase):
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "update_draft") as mock_update:
             self.client.post(
                 "/intake/submit",
@@ -729,6 +733,7 @@ class DraftBankAccountKeyPersistenceRouteTests(unittest.TestCase):
              patch.object(app_module.db, "get_user_list", return_value=[]), \
              patch.object(app_module.db, "get_bank_accounts", return_value=[]), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "update_draft") as mock_update:
             self.client.post(
                 "/intake/submit",

@@ -188,6 +188,7 @@ class DraftFinalizeUsesRealStoredValueTests(unittest.TestCase):
                            return_value={"approval_rule_key": 7, "requires_approver": True,
                                          "requires_controller": True, "requires_vp": False, "requires_cfo": False}), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "finalize_draft_submission") as mock_finalize:
             mock_reveal.side_effect = lambda bi_key, column: (
                 "99988877" if column == "Receiving_Account_Number" else "026009593"
@@ -221,6 +222,7 @@ class DraftFinalizeUsesRealStoredValueTests(unittest.TestCase):
                            return_value={"approval_rule_key": 7, "requires_approver": True,
                                          "requires_controller": True, "requires_vp": False, "requires_cfo": False}), \
              patch.object(app_module, "_upload_intake_attachments"), \
+             patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"), \
              patch.object(app_module.db, "finalize_draft_submission") as mock_finalize:
             data = dict(form)
             data.update(_files())
@@ -556,6 +558,7 @@ class DraftFinalizeAcknowledgmentTests(unittest.TestCase):
                          return_value={"approval_rule_key": 7, "requires_approver": True,
                                        "requires_controller": True, "requires_vp": False, "requires_cfo": False}),
             patch.object(app_module, "_upload_intake_attachments"),
+            patch.object(app_module.db, "get_draft_request_id", return_value="TXN-2026-D100"),
         ]
 
     def test_draft_finalize_without_acknowledgment_is_blocked(self):

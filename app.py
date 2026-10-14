@@ -301,11 +301,74 @@ def _validation_evidence_doc_type(frm):
     return sharepoint.DOC_TYPE_AVS_SCREENSHOT if score >= 90 else sharepoint.DOC_TYPE_VALIDATION_EVIDENCE
 
 
+class AttachmentUploadError(Exception):
+    """One or more selected intake files could not be stored; `labels` names them for the requester."""
+
+    def __init__(self, labels):
+        super().__init__(", ".join(labels))
+        self.labels = list(labels)
+
+
+_ATTACHMENT_LABELS = {
+    "validation_evidence":   "Validation Evidence",
+    "wire_ach_instructions": "External ACH/Wire Instructions",
+    "payment_support":       "Payment Support",
+}
+
+
+def _owned_draft_request_id(draft_transaction_key_raw, user_key):
+    """
+    The Request_ID of the caller's OWN Draft for a posted transaction_key, read from SQL — never
+    taken from the browser's request_id field, so a forged id cannot redirect uploads/attachment
+    lookups to another request. None when there is no such Draft (or the lookup fails).
+    """
+    if not draft_transaction_key_raw:
+        return None
+    try:
+        return db.get_draft_request_id(int(draft_transaction_key_raw), user_key)
+    except Exception:
+        app.logger.exception("Unable to resolve the Draft's Request_ID")
+        return None
+
+
+def _existing_draft_attachments(request_id):
+    """
+    Stored intake documents for a Draft as {slot: {"name", "url"}} from the real SharePoint listing
+    (never browser flags). AVS Screenshot and Validation Evidence both fill the single
+    validation_evidence slot; when a slot has several files the most recently uploaded wins.
+    """
+    found = {}
+    if not request_id or not sharepoint_enabled():
+        return found
+    try:
+        items = sharepoint.list_attachments(request_id)
+    except Exception:
+        app.logger.exception("Unable to load existing draft attachments for %s", request_id)
+        return found
+    for item in sorted(items, key=lambda i: i.get("uploaded_date") or ""):
+        key = sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item.get("doc_type"))
+        if key == "avs_screenshot":
+            key = "validation_evidence"
+        if key in _ATTACHMENT_LABELS:
+            url = item.get("web_url") or ""
+            found[key] = {
+                "name": item.get("original_filename") or item.get("filename", ""),
+                "url": url if url.startswith(("https://", "http://")) else "",
+            }
+    return found
+
+
 def _upload_intake_attachments(request_id):
-    """Upload the Section B/D/E intake files to the SharePoint library, if enabled."""
+    """
+    Upload the Section B/D/E intake files selected in THIS POST to the SharePoint library, if
+    enabled. Every selected file is attempted; if any fail, AttachmentUploadError names them
+    (after the others were stored) so the caller can say so instead of reporting success.
+    A re-save never re-uploads already-stored files (only newly selected ones are sent).
+    """
     if not sharepoint_enabled():
         return
     role = current_roles_display()
+    failed = []
     for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
         file_storage = request.files.get(field_name)
         if field_key == "validation_evidence" and (not file_storage or not file_storage.filename):
@@ -329,6 +392,9 @@ def _upload_intake_attachments(request_id):
             )
         except Exception:
             app.logger.exception("SharePoint upload failed for %s on %s", field_name, request_id)
+            failed.append(_ATTACHMENT_LABELS[field_key])
+    if failed:
+        raise AttachmentUploadError(failed)
 
 
 def _upload_required_intake_attachments(request_id):
@@ -523,10 +589,28 @@ def _intake_property_fields(frm):
     }
 
 
+REQUEST_TYPE_SAME_DAY_ACH = "Same Day ACH"
+SAME_DAY_ACH_URGENCY_REASON = "Same Day ACH"
+# The only request types a new submission or Draft may use (also the intake dropdown).
+REQUEST_TYPES = ('Wire', 'ACH', REQUEST_TYPE_SAME_DAY_ACH, 'ACH Pull', 'Intra Bank Transfer', 'EFT')
+app.jinja_env.globals["REQUEST_TYPES"] = REQUEST_TYPES
+
+
+def effective_urgency(frm):
+    """
+    (urgent, urgency_reason) to validate and persist. Same Day ACH is always urgent
+    with the fixed reason, whatever the browser posted; every other request type keeps
+    the requester's own Urgent choice and reason exactly as before.
+    """
+    if (frm.get("request_type") or "").strip() == REQUEST_TYPE_SAME_DAY_ACH:
+        return True, SAME_DAY_ACH_URGENCY_REASON
+    return frm.get("urgent") == "yes", frm.get("urgency_reason", "")
+
+
 RECIPIENT_MODE_EXTERNAL = "external"
 RECIPIENT_MODE_INTERNAL = "internal"
 # A maintained internal BankAccount may be the recipient only for these request
-# types; Wire, ACH Pull and EFT keep their existing external-recipient behavior.
+# types; Wire, ACH Pull, EFT and Same Day ACH keep external-recipient behavior.
 INTERNAL_RECIPIENT_REQUEST_TYPES = ("ACH", "Intra Bank Transfer")
 
 
@@ -690,6 +774,9 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     # trusted from the POST (Batch 7 Part 1/2/6/17); the caller rejects the
     # submission earlier if the authenticated identity can't be resolved.
     require("request_type", "Request Type")
+    submitted_type = frm.get("request_type") or ""
+    if submitted_type.strip() and submitted_type not in REQUEST_TYPES:
+        errors.append("Please select a valid Request Type.")
     require("treasury_service_date", "Requested Treasury Service Date")
     _require_classification(frm, errors)
     require("approver_key", "Approver")
@@ -714,7 +801,8 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
         errors.append("Amount must be a valid number.")
 
     # B. Urgent
-    if frm.get("urgent") == "yes" and not (frm.get("urgency_reason") or "").strip():
+    urgent, urgency_reason = effective_urgency(frm)
+    if urgent and not (urgency_reason or "").strip():
         errors.append("Urgency Reason is required when the request is marked urgent.")
 
     # C. Originating bank account — never trust the hidden client field alone
@@ -927,7 +1015,7 @@ def _evaluate_prior_use_claim(frm, prior_match):
     return errors, prior_transaction_key
 
 
-_DRAFT_ALLOWED_REQUEST_TYPES = ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT')
+_DRAFT_ALLOWED_REQUEST_TYPES = REQUEST_TYPES
 
 
 def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
@@ -1000,7 +1088,33 @@ def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
         if value and banking_security.is_mask_placeholder(value):
             errors.append(f"{label} looks like a masked placeholder, not a real value.")
 
+    # Verification fields are optional for a Draft, but whatever is supplied must be well-formed
+    # (never silently dropped or coerced).
+    avs_raw = (frm.get("avs_score") or "").strip()
+    if avs_raw:
+        try:
+            avs_ok = 0 <= int(avs_raw) <= 100
+        except ValueError:
+            avs_ok = False
+        if not avs_ok:
+            errors.append("AVS Score must be a whole number between 0 and 100.")
+    for field, label, formats in (
+        ("last_used_date", "Last Date Used", ("%Y-%m-%d",)),
+        ("verbal_confirm_datetime", "Verbal Confirmation Date / Time", ("%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S")),
+    ):
+        value = (frm.get(field) or "").strip()
+        if value and not any(_parses(value, fmt) for fmt in formats):
+            errors.append(f"{label} must be a valid date.")
+
     return errors
+
+
+def _parses(value, fmt):
+    try:
+        datetime.strptime(value, fmt)
+        return True
+    except ValueError:
+        return False
 
 # ─────────────────────────────────────────────────────────────
 #  Jinja2 Filters & Context Processors
@@ -1424,7 +1538,10 @@ def _render_intake_form_again(prepared_by_user, errors):
         pass
     return render_template("intake.html", users=users, approver_users=approver_users,
                             controller_users=controller_users, bank_accounts=bank_accounts,
-                            prepared_by_user=prepared_by_user, errors=errors)
+                            prepared_by_user=prepared_by_user, errors=errors,
+                            existing_attachments=_existing_draft_attachments(
+                                _owned_draft_request_id(request.form.get("transaction_key", "").strip(),
+                                                        prepared_by_user["user_key"])))
 
 
 def _handle_save_draft(frm, prepared_by_user):
@@ -1463,33 +1580,33 @@ def _handle_save_draft(frm, prepared_by_user):
             except ValueError:
                 errors.append(f"{label} is invalid.")
 
-    users, bank_accounts = [], []
-    approver_users, controller_users = [], []
-    try:
-        users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
-        approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
-        controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
-        bank_accounts     = db.get_bank_accounts()
-    except Exception:
-        pass
-
     if errors:
-        for err in errors:
-            flash(err, "warning")
-        return render_template("intake.html", users=users, approver_users=approver_users,
-                                controller_users=controller_users, bank_accounts=bank_accounts,
-                                prepared_by_user=prepared_by_user, errors=errors)
+        return _render_intake_form_again(prepared_by_user, errors)
 
+    urgent, urgency_reason = effective_urgency(frm)
+    user_key = prepared_by_user["user_key"]
+
+    # Persist the "previously used" acknowledgment only when it names the CURRENT authoritative
+    # match; final submission re-derives and re-checks it regardless of what is stored here.
+    prior_transaction_key = None
+    prior_use_ack = (frm.get("prior_use_ack") or "").strip()
+    if frm.get("instructions_previously_used") == "yes" and prior_use_ack:
+        prior_match = _resolve_prior_use_match(
+            frm, draft_transaction_key_raw=draft_transaction_key_raw, prepared_by_user_key=user_key)
+        if prior_match and prior_match.get("request_id") == prior_use_ack:
+            prior_transaction_key = prior_match.get("transaction_key")
+
+    verbal_raw = (frm.get("verbal_confirm_datetime") or "").strip()
     draft_data = {
-        "prepared_by_key":  prepared_by_user["user_key"],
+        "prepared_by_key":  user_key,
         "request_type":     frm.get("request_type", "").strip(),
         "treasury_service_date": frm.get("treasury_service_date", "").strip(),
         **_intake_property_fields(frm),
         "amount":           float((frm.get("amount") or "0").replace(",", "") or 0),
         "currency":         frm.get("currency", "USD"),
         "payment_purpose":  frm.get("payment_purpose", ""),
-        "urgent":           frm.get("urgent") == "yes",
-        "urgency_reason":   frm.get("urgency_reason", ""),
+        "urgent":           urgent,
+        "urgency_reason":   urgency_reason,
         "bank_account_key": int(bank_account_key_raw),
         "approver_key":     int(frm.get("approver_key")),
         "controller_key":   int(frm.get("controller_key")),
@@ -1503,32 +1620,54 @@ def _handle_save_draft(frm, prepared_by_user):
         "recv_account_number": frm.get("recv_account_number", "").strip(),
         "recv_routing_number": frm.get("recv_routing_number", "").strip(),
         "recv_bank_address":  frm.get("recv_bank_address", ""),
+        # Verification entered so far (optional for a Draft; restored on Resume).
+        "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
+        "last_used_date":        (frm.get("last_used_date") or "").strip(),
+        "prior_transaction_key": prior_transaction_key,
+        "verbal_confirmed":      frm.get("verbal_confirmed") == "on",
+        "verbal_known_contact":  frm.get("verbal_confirmed_with_known") == "on",
+        "verbal_requester":      frm.get("verbal_confirmed_with_requester") == "on",
+        "verbal_contact_name":   frm.get("verbal_contact_name", ""),
+        "verbal_confirm_datetime": (
+            verbal_raw.replace("T", " ") + (":00" if len(verbal_raw) == 16 else "") if verbal_raw else ""
+        ),
+        "avs_score":             (frm.get("avs_score") or "").strip(),
+        "external_source":       frm.get("external_source") == "on",
+        "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
     }
 
     try:
         if draft_transaction_key_raw:
             transaction_key = int(draft_transaction_key_raw)
-            db.update_draft(transaction_key, draft_data, prepared_by_user_key=prepared_by_user["user_key"])
-            request_id = frm.get("request_id", "").strip()
-            flash("Draft updated.", "success")
+            request_id = _owned_draft_request_id(draft_transaction_key_raw, user_key)
+            if request_id is None:
+                raise db.DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
+            db.update_draft(transaction_key, draft_data, prepared_by_user_key=user_key)
+            saved_message = "Draft updated."
         else:
             request_id, transaction_key = db.create_draft(draft_data)
-            flash("Draft saved.", "success")
-        _upload_intake_attachments(request_id)  # best-effort; nothing required for a Draft
+            saved_message = "Draft saved."
     except db.DraftNotEditableError:
         flash("This draft is no longer editable (it may have already been submitted).", "danger")
         return redirect(url_for("dashboard"))
     except db.InternalRecipientError as exc:
-        flash(str(exc), "warning")
-        return render_template("intake.html", users=users, approver_users=approver_users,
-                                controller_users=controller_users, bank_accounts=bank_accounts,
-                                prepared_by_user=prepared_by_user, errors=[str(exc)])
+        return _render_intake_form_again(prepared_by_user, [str(exc)])
     except Exception:
         app.logger.exception("Draft save failed")
         flash("Unable to save this draft. Please try again.", "danger")
-        return render_template("intake.html", users=users, approver_users=approver_users,
-                                controller_users=controller_users, bank_accounts=bank_accounts,
-                                prepared_by_user=prepared_by_user, errors=[])
+        return _render_intake_form_again(prepared_by_user, [])
+
+    # The Draft is stored; only now report on documents, so a failed upload is never shown as a success.
+    try:
+        _upload_intake_attachments(request_id)
+    except AttachmentUploadError as exc:
+        flash(
+            f"{saved_message[:-1]}, but these documents could not be uploaded and are NOT attached: "
+            f"{', '.join(exc.labels)}. Select them again and click Save Draft to retry.",
+            "warning",
+        )
+    else:
+        flash(saved_message, "success")
 
     return redirect(url_for("intake_draft_edit", transaction_key=transaction_key))
 
@@ -1638,15 +1777,7 @@ def intake_draft_edit(transaction_key):
     # Show which required attachments are already on file for this Draft
     # (Part 4) — reuses the same SharePoint architecture/Request_ID, no new
     # storage; the requester is never asked to re-upload something already saved.
-    existing_attachments = {}
-    if sharepoint_enabled():
-        try:
-            for item in sharepoint.list_attachments(draft["request_id"]):
-                key = sharepoint.DOC_TYPE_TO_ATTACHMENT_KEY.get(item["doc_type"])
-                if key:
-                    existing_attachments[key] = item.get("original_filename") or item.get("filename", "")
-        except Exception:
-            app.logger.exception("Unable to load existing draft attachments for %s", draft["request_id"])
+    existing_attachments = _existing_draft_attachments(draft["request_id"])
     return render_template(
         "intake.html", users=users, approver_users=approver_users, controller_users=controller_users,
         bank_accounts=bank_accounts,
@@ -1703,6 +1834,11 @@ def intake_submit():
         return _handle_save_draft(frm, prepared_by_user)
 
     draft_transaction_key_raw = frm.get("transaction_key", "").strip() if _db_on else ""
+    # The Draft's Request_ID always comes from SQL for the caller's own Draft — never from the form.
+    draft_request_id = (
+        _owned_draft_request_id(draft_transaction_key_raw, prepared_by_user["user_key"])
+        if (_db_on and draft_transaction_key_raw) else None
+    )
 
     try:
         amount = float(frm.get("amount", "0").replace(",", "") or 0)
@@ -1717,6 +1853,7 @@ def intake_submit():
         verbal_parts.append("Requesting Person")
 
     approval_tier = get_approval_tier(amount)
+    urgent, urgency_reason = effective_urgency(frm)
     request_id = f"TXN-{datetime.now().year}-{random.randint(100, 999)}"
 
     record = {
@@ -1738,8 +1875,8 @@ def intake_submit():
         # Every transaction starts at Pending Approver; tier only determines
         # later VP/CFO requirements (see workflow.py for the additive routing model).
         "status":                workflow.STATUS_PENDING_APPROVER,
-        "urgent":                frm.get("urgent") == "yes",
-        "urgency_reason":        frm.get("urgency_reason", ""),
+        "urgent":                urgent,
+        "urgency_reason":        urgency_reason,
         "payment_purpose":       frm.get("payment_purpose", ""),
         "over_1m":               amount > 1_000_000,
         "assigned_approver":     "Pending Assignment",
@@ -1810,7 +1947,7 @@ def intake_submit():
             "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
         }
         files_present = (
-            _resolve_files_present(frm.get("request_id", ""), newly_selected=newly_selected)
+            _resolve_files_present(draft_request_id or "", newly_selected=newly_selected)
             if draft_transaction_key_raw else newly_selected
         )
         bank_account_key_raw = frm.get("bank_account_key", "").strip()
@@ -1847,18 +1984,7 @@ def intake_submit():
         if errors:
             for err in errors:
                 flash(err, "warning")
-            users, bank_accounts = [], []
-            approver_users, controller_users = [], []
-            try:
-                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
-                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
-                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
-                bank_accounts     = db.get_bank_accounts()
-            except Exception:
-                pass
-            return render_template("intake.html", users=users, approver_users=approver_users,
-                                    controller_users=controller_users, bank_accounts=bank_accounts,
-                                    prepared_by_user=prepared_by_user, errors=errors)
+            return _render_intake_form_again(prepared_by_user, errors)
 
         # Resolve the ApprovalRule BEFORE reserving a Request_ID / uploading
         # required evidence (Part 8) — a configuration failure should never
@@ -1868,26 +1994,25 @@ def intake_submit():
         except db.ApprovalRuleConfigurationError as exc:
             app.logger.error("ApprovalRule resolution failed: %s", exc)
             flash(f"Unable to route this request: {exc}", "danger")
-            users, bank_accounts = [], []
-            approver_users, controller_users = [], []
-            try:
-                users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
-                approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
-                controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
-                bank_accounts     = db.get_bank_accounts()
-            except Exception:
-                pass
-            return render_template("intake.html", users=users, approver_users=approver_users,
-                                    controller_users=controller_users, bank_accounts=bank_accounts,
-                                    prepared_by_user=prepared_by_user, errors=[])
+            return _render_intake_form_again(prepared_by_user, [])
 
         if draft_transaction_key_raw:
             # Batch 8 Part 15: finalize an EXISTING Draft — same Transaction_Key/
             # Request_ID, same validation/rule-resolution as any new submission.
             try:
                 transaction_key = int(draft_transaction_key_raw)
-                request_id = frm.get("request_id", "").strip()
-                _upload_intake_attachments(request_id)  # any new files attached in this POST
+                request_id = draft_request_id
+                if request_id is None:
+                    raise db.WorkflowConflictError("This draft could not be found, is not yours, or is no longer a draft.")
+                try:
+                    _upload_intake_attachments(request_id)  # any new files attached in this POST
+                except AttachmentUploadError as exc:
+                    flash(
+                        "Your request was NOT submitted: these documents could not be uploaded: "
+                        f"{', '.join(exc.labels)}. Please select them again and submit.",
+                        "danger",
+                    )
+                    return _render_intake_form_again(prepared_by_user, [])
                 _vdt_raw = frm.get("verbal_confirm_datetime", "")
                 _vdt = (_vdt_raw.replace("T", " ") + ":00") if _vdt_raw else ""
                 finalize_data = {
@@ -1900,8 +2025,8 @@ def intake_submit():
                     "amount":                amount,
                     "currency":              frm.get("currency", "USD"),
                     "payment_purpose":       frm.get("payment_purpose", ""),
-                    "urgent":                frm.get("urgent") == "yes",
-                    "urgency_reason":        frm.get("urgency_reason", ""),
+                    "urgent":                urgent,
+                    "urgency_reason":        urgency_reason,
                     "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
                     "last_used_date":        frm.get("last_used_date", ""),
                     "prior_transaction_key": prior_transaction_key,
@@ -1947,18 +2072,7 @@ def intake_submit():
             except Exception:
                 app.logger.exception("Draft finalization failed for transaction_key=%s", draft_transaction_key_raw)
                 flash("Unable to submit this request. Please try again.", "danger")
-                users, bank_accounts = [], []
-                approver_users, controller_users = [], []
-                try:
-                    users             = _get_user_list_excluding_self(prepared_by_user["user_key"])
-                    approver_users    = _role_candidates_excluding_self("sam", prepared_by_user["user_key"])
-                    controller_users  = _role_candidates_excluding_self("controller", prepared_by_user["user_key"])
-                    bank_accounts     = db.get_bank_accounts()
-                except Exception:
-                    pass
-                return render_template("intake.html", users=users, approver_users=approver_users,
-                                        controller_users=controller_users, bank_accounts=bank_accounts,
-                                        prepared_by_user=prepared_by_user, errors=[])
+                return _render_intake_form_again(prepared_by_user, [])
 
         try:
             request_id = db.reserve_request_id()
@@ -1986,8 +2100,8 @@ def intake_submit():
                 "currency":              frm.get("currency", "USD"),
                 "payment_purpose":       frm.get("payment_purpose", ""),
                 "status":                workflow.STATUS_PENDING_APPROVER,
-                "urgent":                frm.get("urgent") == "yes",
-                "urgency_reason":        frm.get("urgency_reason", ""),
+                "urgent":                urgent,
+                "urgency_reason":        urgency_reason,
                 "instructions_previously_used": frm.get("instructions_previously_used") == "yes",
                 "last_used_date":        frm.get("last_used_date", ""),
                 "prior_transaction_key": prior_transaction_key,
@@ -2068,7 +2182,10 @@ def intake_submit():
     submitted = session.get("submitted_requests", [])
     submitted.append(record)
     session["submitted_requests"] = submitted
-    _upload_intake_attachments(request_id)
+    try:
+        _upload_intake_attachments(request_id)
+    except AttachmentUploadError as exc:
+        flash(f"These documents could not be uploaded: {', '.join(exc.labels)}.", "warning")
 
     return redirect(url_for("confirmation", request_id=request_id))
 
@@ -2115,7 +2232,10 @@ def intake_precheck():
         "payment_support":       frm.get("has_payment_support") == "true",
     }
     files_present = (
-        _resolve_files_present(frm.get("request_id", ""), newly_selected=newly_selected)
+        _resolve_files_present(
+            _owned_draft_request_id(draft_transaction_key_raw, prepared_by_user["user_key"]) or ""
+            if prepared_by_user is not None else "",
+            newly_selected=newly_selected)
         if draft_transaction_key_raw else newly_selected
     )
 

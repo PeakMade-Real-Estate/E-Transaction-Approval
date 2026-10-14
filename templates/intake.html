@@ -2,6 +2,15 @@
 {% block title %}New Treasury Request — E-Transaction Approval Dashboard{% endblock %}
 
 {% block content %}
+{% macro existing_attachment_note(item) %}
+{% if item %}
+<div class="text-success small mt-1" data-existing-attachment>
+    <i class="fas fa-paperclip me-1"></i>Existing attachment: <strong>{{ item.name }}</strong>
+    {% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noopener" class="ms-2">View Attachment</a>{% endif %}
+    <span class="text-muted ms-2">Choose a file above only to replace it.</span>
+</div>
+{% endif %}
+{% endmacro %}
 <div class="d-flex justify-content-between align-items-start mb-4 flex-wrap gap-2">
     <div>
         <h2 class="mb-1 fw-bold">
@@ -44,8 +53,8 @@
         <form method="POST" action="{{ url_for('intake_submit') }}"
               enctype="multipart/form-data" id="intake-form" novalidate>
             <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-            <input type="hidden" id="transaction_key" name="transaction_key" value="{{ draft.transaction_key if draft else '' }}">
-            <input type="hidden" name="request_id" value="{{ draft.request_id if draft else '' }}">
+            <input type="hidden" id="transaction_key" name="transaction_key" value="{{ draft.transaction_key if draft else request.form.get('transaction_key', '') }}">
+            <input type="hidden" name="request_id" value="{{ draft.request_id if draft else request.form.get('request_id', '') }}">
 
             {% if draft %}
             <div class="alert alert-info d-flex align-items-center gap-2">
@@ -76,7 +85,7 @@
                                 </label>
                                 <select class="form-select" id="request_type" name="request_type" required>
                                     <option value="">— Select Type —</option>
-                                    {% for t in ('Wire', 'ACH', 'ACH Pull', 'Intra Bank Transfer', 'EFT') %}
+                                    {% for t in REQUEST_TYPES %}
                                     <option value="{{ t }}" {% if (draft.request_type if draft else request.form.get('request_type')) == t %}selected{% endif %}>{{ t }}</option>
                                     {% endfor %}
                                 </select>
@@ -101,16 +110,16 @@
                                     <input class="form-check-input" type="checkbox"
                                            id="instructions_previously_used"
                                            name="instructions_previously_used" value="yes"
-                                           {% if request.form.get('instructions_previously_used') == 'yes' %}checked{% endif %}>
+                                           {% if (draft.instructions_previously_used if draft else request.form.get('instructions_previously_used') == 'yes') %}checked{% endif %}>
                                     <label class="form-check-label" for="instructions_previously_used">
                                         These instructions have been used previously
                                     </label>
                                 </div>
                                 <div id="last-used-date-row" class="mt-2" style="display:none;">
                                     <label class="form-label fw-semibold mb-1" for="last_used_date">Last Date Used <span class="text-danger">*</span></label>
-                                    <input type="date" class="form-control" id="last_used_date" name="last_used_date" value="{{ request.form.get('last_used_date', '') }}">
+                                    <input type="date" class="form-control" id="last_used_date" name="last_used_date" value="{{ draft.last_used_date if draft else request.form.get('last_used_date', '') }}">
                                 </div>
-                                <input type="hidden" id="prior_use_ack" name="prior_use_ack" value="{{ request.form.get('prior_use_ack', '') }}">
+                                <input type="hidden" id="prior_use_ack" name="prior_use_ack" value="{{ draft.prior_request_id if draft else request.form.get('prior_use_ack', '') }}">
                                 <div id="prior-use-match-panel" style="display:none;"></div>
                                 <div id="new-instructions-notice"
                                      class="alert alert-warning py-2 px-3 mt-2 small">
@@ -140,6 +149,9 @@
                                                {% if (not draft.urgent if draft else request.form.get('urgent') != 'yes') %}checked{% endif %}>
                                         <label class="form-check-label" for="urgent_no">No</label>
                                     </div>
+                                </div>
+                                <div id="urgent-auto-note" class="form-text text-danger" style="display:none;">
+                                    Same Day ACH requests are automatically marked urgent.
                                 </div>
                             </div>
 
@@ -308,7 +320,7 @@
                                 <div class="form-check mb-2">
                                     <input class="form-check-input" type="checkbox"
                                            id="verbal_confirmed" name="verbal_confirmed"
-                                           {% if request.form.get('verbal_confirmed') == 'on' %}checked{% endif %}>
+                                           {% if (draft.verbal_confirmed if draft else request.form.get('verbal_confirmed') == 'on') %}checked{% endif %}>
                                     <label class="form-check-label fw-semibold" for="verbal_confirmed">
                                         Wire/ACH instructions verbally confirmed
                                     </label>
@@ -317,7 +329,7 @@
                                     <div class="form-check mb-1">
                                         <input class="form-check-input" type="checkbox"
                                                id="verbal_with_known" name="verbal_confirmed_with_known"
-                                               {% if request.form.get('verbal_confirmed_with_known') == 'on' %}checked{% endif %}>
+                                               {% if (draft.verbal_known_contact if draft else request.form.get('verbal_confirmed_with_known') == 'on') %}checked{% endif %}>
                                         <label class="form-check-label small" for="verbal_with_known">
                                             Verbally confirmed with a <strong>known contact</strong>
                                         </label>
@@ -325,7 +337,7 @@
                                     <div class="form-check mb-1">
                                         <input class="form-check-input" type="checkbox"
                                                id="verbal_with_requester" name="verbal_confirmed_with_requester"
-                                               {% if request.form.get('verbal_confirmed_with_requester') == 'on' %}checked{% endif %}>
+                                               {% if (draft.verbal_requester if draft else request.form.get('verbal_confirmed_with_requester') == 'on') %}checked{% endif %}>
                                         <label class="form-check-label small" for="verbal_with_requester">
                                             Verbally confirmed with the <strong>person requesting the transaction</strong>
                                         </label>
@@ -336,12 +348,12 @@
                             <!-- Verbal contact details -->
                             <div class="col-md-6">
                                 <label class="form-label" for="verbal_contact_name">Verbal Confirmation Contact Name</label>
-                                <input type="text" class="form-control" id="verbal_contact_name" value="{{ request.form.get('verbal_contact_name', '') }}"
+                                <input type="text" class="form-control" id="verbal_contact_name" value="{{ draft.verbal_contact_name if draft else request.form.get('verbal_contact_name', '') }}"
                                        name="verbal_contact_name" placeholder="Full name of contact confirmed with">
                             </div>
                             <div class="col-md-6">
                                 <label class="form-label" for="verbal_confirm_datetime">Verbal Confirmation Date / Time</label>
-                                <input type="datetime-local" class="form-control" id="verbal_confirm_datetime" value="{{ request.form.get('verbal_confirm_datetime', '') }}"
+                                <input type="datetime-local" class="form-control" id="verbal_confirm_datetime" value="{{ draft.verbal_confirm_datetime if draft else request.form.get('verbal_confirm_datetime', '') }}"
                                        name="verbal_confirm_datetime">
                             </div>
 
@@ -351,7 +363,7 @@
                                     AVS Score <span class="text-muted fw-normal small">(0–100)</span>
                                 </label>
                                 <div class="input-group">
-                                    <input type="number" class="form-control" id="avs_score" value="{{ request.form.get('avs_score', '') }}"
+                                    <input type="number" class="form-control" id="avs_score" value="{{ draft.avs_score if draft else request.form.get('avs_score', '') }}"
                                            name="avs_score" min="0" max="100" placeholder="e.g. 95">
                                     <span class="input-group-text">/100</span>
                                 </div>
@@ -365,10 +377,9 @@
                                 </label>
                                 <input type="file" class="form-control" id="file_validation_evidence"
                                        name="file_validation_evidence"
+                                       {% if existing_attachments and existing_attachments.validation_evidence %}data-existing="true"{% endif %}
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
-                                {% if existing_attachments and existing_attachments.validation_evidence %}
-                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.validation_evidence }} (select a new file only to replace it)</div>
-                                {% endif %}
+                                {{ existing_attachment_note(existing_attachments.validation_evidence if existing_attachments else None) }}
                                 <div class="form-text">
                                     Attach the Wells Fargo AVS screenshot, or alternative verification if unavailable.
                                 </div>
@@ -390,7 +401,7 @@
                                     <div class="form-check mb-2">
                                         <input class="form-check-input" type="checkbox"
                                                id="external_source" name="external_source"
-                                               {% if request.form.get('external_source') == 'on' %}checked{% endif %}>
+                                               {% if (draft.external_source if draft else request.form.get('external_source') == 'on') %}checked{% endif %}>
                                         <label class="form-check-label" for="external_source">
                                             ACH/Wire instructions provided from an <strong>external source</strong>
                                         </label>
@@ -398,7 +409,7 @@
                                     <div class="form-check">
                                         <input class="form-check-input" type="checkbox"
                                                id="internal_doc_not_used" name="internal_doc_not_used"
-                                               {% if request.form.get('internal_doc_not_used') == 'on' %}checked{% endif %}>
+                                               {% if (draft.internal_doc_not_used if draft else request.form.get('internal_doc_not_used') == 'on') %}checked{% endif %}>
                                         <label class="form-check-label" for="internal_doc_not_used">
                                             An internal document was <strong>not</strong> used as banking instruction backup
                                         </label>
@@ -667,10 +678,9 @@
                                 </label>
                                 <input type="file" class="form-control" id="file_wire_ach_instructions"
                                        name="file_wire_ach_instructions"
+                                       {% if existing_attachments and existing_attachments.wire_ach_instructions %}data-existing="true"{% endif %}
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx">
-                                {% if existing_attachments and existing_attachments.wire_ach_instructions %}
-                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.wire_ach_instructions }} (select a new file only to replace it)</div>
-                                {% endif %}
+                                {{ existing_attachment_note(existing_attachments.wire_ach_instructions if existing_attachments else None) }}
                                 <div id="wire-instructions-exempt-note" class="alert alert-info py-2 mt-2 mb-0 small" style="display:none;">
                                     External ACH/Wire Instructions: Not required for transfers between maintained internal accounts.
                                 </div>
@@ -702,7 +712,7 @@
                                 </label>
                                 <div class="input-group">
                                     <span class="input-group-text fw-semibold">$</span>
-                                    <input type="number" class="form-control form-control-lg" id="amount" value="{{ draft.amount if draft else request.form.get('amount', '') }}"
+                                    <input type="number" class="form-control form-control-lg" id="amount" value="{{ ('%.2f' % draft.amount) if draft else request.form.get('amount', '') }}"
                                            name="amount" placeholder="0.00" step="0.01" min="0" required>
                                 </div>
                             </div>
@@ -770,10 +780,9 @@
                                 </label>
                                 <input type="file" class="form-control" id="file_payment_support"
                                        name="file_payment_support"
+                                       {% if existing_attachments and existing_attachments.payment_support %}data-existing="true"{% endif %}
                                        accept=".pdf,.png,.jpg,.jpeg,.xlsx,.docx,.msg,.eml">
-                                {% if existing_attachments and existing_attachments.payment_support %}
-                                <div class="text-success small mt-1"><i class="fas fa-paperclip me-1"></i>Already uploaded: {{ existing_attachments.payment_support }} (select a new file only to replace it)</div>
-                                {% endif %}
+                                {{ existing_attachment_note(existing_attachments.payment_support if existing_attachments else None) }}
                                 <div class="form-text">Accepted: invoices, vendor emails, calculations, statements, or any documentation supporting the payment amount and purpose.</div>
                             </div>
 
@@ -934,6 +943,7 @@
                     <ul class="list-group list-group-flush small">
                         <li class="list-group-item"><strong>Wire:</strong> Same-day if released before bank cutoff.</li>
                         <li class="list-group-item"><strong>ACH:</strong> ~2-day if released before bank cutoff.</li>
+                        <li class="list-group-item"><strong>Same Day ACH:</strong> ACH requested for same-day processing; automatically marked urgent.</li>
                         <li class="list-group-item"><strong>ACH Pull:</strong> Receiving bank initiates. Use only if ACH/Wire unavailable at originating bank.</li>
                         <li class="list-group-item"><strong>Intra Bank:</strong> Internal transfers. SD True Ups: accountants may move directly.</li>
                         <li class="list-group-item"><strong>EFT:</strong> Canada-specific equivalent of ACH.</li>
@@ -1011,8 +1021,45 @@
     document.querySelectorAll('input[name="urgent"]').forEach(el => el.addEventListener('change', onUrgentChange));
     onUrgentChange();  // reflect a resumed Draft's stored urgent value on load
 
+    // ── Same Day ACH → automatic Urgent + reason (the server re-derives both) ──
+    const SAME_DAY_ACH_TYPE = 'Same Day ACH';
+    const SAME_DAY_ACH_REASON = 'Same Day ACH';
+    let manualUrgency = null;  // the requester's own choice, held while Same Day ACH forces urgency
+
+    function applyAutomaticUrgency(isInitialLoad) {
+        const reqType = document.getElementById('request_type')?.value || '';
+        const yes = document.getElementById('urgent_yes');
+        const no = document.getElementById('urgent_no');
+        const reason = document.getElementById('urgency_reason');
+        const note = document.getElementById('urgent-auto-note');
+        if (!yes || !no || !reason) return;
+        const auto = reqType === SAME_DAY_ACH_TYPE;
+        if (auto) {
+            if (manualUrgency === null) {
+                // A resumed Same Day ACH Draft already holds the automatic values, not a manual choice.
+                const alreadyAuto = isInitialLoad || reason.value === SAME_DAY_ACH_REASON;
+                manualUrgency = alreadyAuto ? { urgent: false, reason: '' } : { urgent: yes.checked, reason: reason.value };
+            }
+            yes.checked = true;
+            no.disabled = true;
+            reason.value = SAME_DAY_ACH_REASON;
+            reason.readOnly = true;
+        } else {
+            no.disabled = false;
+            reason.readOnly = false;
+            if (manualUrgency !== null) {
+                yes.checked = manualUrgency.urgent;
+                no.checked = !manualUrgency.urgent;
+                reason.value = manualUrgency.reason;
+                manualUrgency = null;
+            }
+        }
+        if (note) note.style.display = auto ? 'block' : 'none';
+        onUrgentChange();
+    }
+
     // ── Previously Used Instructions → show/hide date picker ────
-    function onInstructionsPreviouslyUsedChange() {
+    function onInstructionsPreviouslyUsedChange(isInitialLoad) {
         const cb      = document.getElementById('instructions_previously_used');
         const dateRow = document.getElementById('last-used-date-row');
         const notice  = document.getElementById('new-instructions-notice');
@@ -1023,7 +1070,7 @@
         if (notice)  notice.style.display  = checked ? 'none'  : 'block';
         if (dateIn)  dateIn.required       = checked;
         if (!checked && dateIn) dateIn.value = '';
-        schedulePriorUseCheck();
+        schedulePriorUseCheck(isInitialLoad === true);
     }
 
     // ── Previously Used Instructions → server-backed prior-use precheck ──
@@ -1130,8 +1177,10 @@
         }
     }
 
-    function schedulePriorUseCheck() {
-        clearPriorUseAcknowledgment();
+    function schedulePriorUseCheck(keepAck) {
+        // keepAck: initial page load of a saved Draft — the stored acknowledgment is kept until the
+        // fresh server check below either confirms it matches the current prior transaction or clears it.
+        if (keepAck !== true) clearPriorUseAcknowledgment();
         if (priorUseCheckTimer) clearTimeout(priorUseCheckTimer);
         priorUseCheckTimer = setTimeout(checkPriorUseMatch, 500);
     }
@@ -1183,7 +1232,9 @@
             externalRadio.checked = true;
             if (typeof clearRecipientSelection === 'function') clearRecipientSelection();
             if (note) {
-                note.textContent = 'An internal company account can only be the recipient of an ACH or Intra Bank Transfer request; switched back to External payee.';
+                note.textContent = reqType === SAME_DAY_ACH_TYPE
+                    ? 'Same Day ACH requires an external payee; switched back to External payee.'
+                    : 'An internal company account can only be the recipient of an ACH or Intra Bank Transfer request; switched back to External payee.';
                 note.style.display = 'block';
             }
         } else if (note && typeAllowed) {
@@ -1259,12 +1310,12 @@
 
         // Section B — Validation Evidence
         const valEv = document.getElementById('file_validation_evidence');
-        if (valEv && !valEv.files.length)
+        if (valEv && !valEv.files.length && !valEv.dataset.existing)
             errors.push({ msg: '<strong>Validation Evidence</strong> — attach the WF AVS screenshot or alternative verification.', section: 'sectionB' });
 
         // Section D — External ACH/Wire Instructions
         const wireInstr = document.getElementById('file_wire_ach_instructions');
-        if (wireInstr && !wireInstr.files.length && !updateInstructionsRequirement())
+        if (wireInstr && !wireInstr.files.length && !wireInstr.dataset.existing && !updateInstructionsRequirement())
             errors.push({ msg: '<strong>External ACH/Wire Instructions</strong> must be attached.', section: 'sectionD' });
 
         // Section D — Beneficiary address required for Wire
@@ -1276,7 +1327,7 @@
 
         // Section E — Payment Support
         const paySup = document.getElementById('file_payment_support');
-        if (paySup && !paySup.files.length)
+        if (paySup && !paySup.files.length && !paySup.dataset.existing)
             errors.push({ msg: '<strong>Payment Support</strong> documentation must be attached.', section: 'sectionE' });
 
         // Section A — Previously Used must be acknowledged against the matched prior transaction
@@ -1458,7 +1509,7 @@
         const prevUsedCb = document.getElementById('instructions_previously_used');
         if (prevUsedCb) {
             prevUsedCb.addEventListener('change', onInstructionsPreviouslyUsedChange);
-            onInstructionsPreviouslyUsedChange();
+            onInstructionsPreviouslyUsedChange(true);
         }
 
         // Changing WHAT was previously used invalidates any prior acknowledgment
@@ -1473,7 +1524,9 @@
         if (reqTypeEl) {
             reqTypeEl.addEventListener('change', onRequestTypeWireCheck);
             reqTypeEl.addEventListener('change', applyRecipientMode);
+            reqTypeEl.addEventListener('change', () => applyAutomaticUrgency(false));
             onRequestTypeWireCheck();
+            applyAutomaticUrgency(true);
         }
 
         // Recipient type (External default / Internal maintained account)
