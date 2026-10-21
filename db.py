@@ -9,6 +9,7 @@ nothing here runs at import time.
 
 import os
 import struct
+import time
 from datetime import datetime
 from decimal import Decimal
 
@@ -362,10 +363,104 @@ def get_last_rfi_origin_status(transaction_key):
         conn.close()
 
 
+def _eligible_role_holder_keys(role_code, team=None):
+    """
+    Distinct User_Keys of ACTIVE users holding an ACTIVE, currently effective `role_code` role. DISTINCT collapses the
+    several role rows a user has (one per accounting group). When `team` is given it must equal AppUser.Team exactly -
+    unlike get_reassignment_candidates(), a user with a blank Team is NOT included.
+    """
+    sql = (
+        "SELECT DISTINCT u.User_Key FROM etransactions.AppUserRole r "
+        "JOIN etransactions.AppUser u ON u.User_Key = r.User_Key "
+        "WHERE r.Role_Code = ? AND r.Is_Active = 1 AND u.Active_Status = 1 "
+        "AND (r.Effective_Start_Date IS NULL OR r.Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+        "AND (r.Effective_End_Date IS NULL OR r.Effective_End_Date >= CAST(GETDATE() AS DATE))"
+    )
+    params = [role_code]
+    if team is not None:
+        sql += " AND u.Team = ?"
+        params.append(team)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(sql, params)
+        return sorted(row[0] for row in cur.fetchall())
+    finally:
+        conn.close()
+
+
+def get_eligible_vp_user_keys(team):
+    """Distinct active VP users whose AppUser.Team equals `team` (workflow.TEAM_CORPORATE / TEAM_PROPERTY)."""
+    if not (team or "").strip():
+        raise ValueError("A team is required to look up the eligible VP.")
+    return _eligible_role_holder_keys("vp", team)
+
+
+def get_eligible_cfo_user_keys():
+    """Distinct active CFO users. The CFO is company-wide, so AppUser.Team is deliberately not considered."""
+    return _eligible_role_holder_keys("cfo")
+
+
+def get_requester_controller_context(user_key):
+    """
+    {"is_controller": bool, "team": AppUser.Team or None} for an ACTIVE AppUser, or None if there is no such user.
+    is_controller is true when the user holds an active, currently effective 'controller' AppUserRole (whatever else
+    they hold, and whatever team they are on); the Team is returned as stored so the caller can fail safely on a
+    blank or unexpected value.
+    """
+    if not user_key:
+        return None
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT u.Team, "
+            "MAX(CASE WHEN r.Role_Code = 'controller' THEN 1 ELSE 0 END) "
+            "FROM etransactions.AppUser u "
+            "LEFT JOIN etransactions.AppUserRole r ON r.User_Key = u.User_Key AND r.Is_Active = 1 "
+            "AND (r.Effective_Start_Date IS NULL OR r.Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+            "AND (r.Effective_End_Date IS NULL OR r.Effective_End_Date >= CAST(GETDATE() AS DATE)) "
+            "WHERE u.User_Key = ? AND u.Active_Status = 1 "
+            "GROUP BY u.Team",
+            [user_key],
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        return {"is_controller": bool(row[1]), "team": (row[0] or "").strip() or None}
+    finally:
+        conn.close()
+
+
+def get_eligible_controllers(team):
+    """
+    Distinct active Controllers ({"user_key", "display_name"}) whose AppUser.Team equals `team` exactly. Same strict
+    eligibility as the VP lookup: an active, currently effective 'controller' role; a blank Team is never eligible.
+    """
+    if not (team or "").strip():
+        raise ValueError("A team is required to look up the eligible Controller.")
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT DISTINCT u.User_Key, u.Display_Name FROM etransactions.AppUserRole r "
+            "JOIN etransactions.AppUser u ON u.User_Key = r.User_Key "
+            "WHERE r.Role_Code = 'controller' AND r.Is_Active = 1 AND u.Active_Status = 1 AND u.Team = ? "
+            "AND (r.Effective_Start_Date IS NULL OR r.Effective_Start_Date <= CAST(GETDATE() AS DATE)) "
+            "AND (r.Effective_End_Date IS NULL OR r.Effective_End_Date >= CAST(GETDATE() AS DATE)) "
+            "ORDER BY u.User_Key",
+            [team],
+        )
+        return [{"user_key": row[0], "display_name": row[1]} for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def advance_transaction_workflow(
     transaction_key, *, from_status, new_status, new_owner_user_key,
     actor_user_key, actor_role, action, workflow_role=None,
     comments=None, bank_releaser_user_key=None,
+    vp_approver_user_key=None, cfo_approver_user_key=None,
 ):
     """
     Atomically advance a transaction's workflow state:
@@ -401,11 +496,22 @@ def advance_transaction_workflow(
         if bank_releaser_user_key is not None:
             set_clauses.append("BankReleaser_User_Key = ?")
             params.append(bank_releaser_user_key)
+        # A newly resolved VP/CFO is written by the SAME statement that moves the transaction into that stage, and
+        # only while the column is still empty - an existing assignment is never overwritten.
+        extra_where = ""
+        if vp_approver_user_key is not None:
+            set_clauses.append("VPApprover_User_Key = ?")
+            params.append(vp_approver_user_key)
+            extra_where += " AND VPApprover_User_Key IS NULL"
+        if cfo_approver_user_key is not None:
+            set_clauses.append("CFOApprover_User_Key = ?")
+            params.append(cfo_approver_user_key)
+            extra_where += " AND CFOApprover_User_Key IS NULL"
         params.extend([transaction_key, from_status])
 
         cur.execute(
             f"UPDATE etransactions.ETransaction SET {', '.join(set_clauses)} "
-            "WHERE Transaction_Key = ? AND Current_Status = ?",
+            f"WHERE Transaction_Key = ? AND Current_Status = ?{extra_where}",
             params,
         )
         if cur.rowcount == 0:
@@ -633,6 +739,7 @@ SELECT
     t.Urgent_Flag                              AS urgent,
     t.Urgency_Reason                           AS urgency_reason,
     t.Current_Status                           AS status,
+    t.PreparedBy_User_Key                      AS prepared_by_user_key,
     t.Current_Workflow_Stage                   AS current_workflow_stage,
     t.Approval_Tier_Snapshot                   AS approval_tier,
     t.Requires_VP                              AS requires_vp,
@@ -655,6 +762,21 @@ LEFT JOIN [etransactions].[AppUser] cfo   ON cfo.User_Key   = t.CFOApprover_User
 LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = t.Entity_Key
 LEFT JOIN [etransactions].[AccountingGroup] ag ON ag.AccountingGroup_Key = be.AccountingGroup_Key
 """
+
+
+_DASHBOARD_MODE_MARKER = "AS days_pending\nFROM [etransactions].[ETransaction] t"
+
+
+def _dashboard_sql(with_recipient_mode: bool) -> str:
+    """The dashboard query; selects ETransaction.Recipient_Mode only when the migrated schema is present."""
+    if not with_recipient_mode:
+        return _DASHBOARD_SQL_BASE
+    assert _DASHBOARD_MODE_MARKER in _DASHBOARD_SQL_BASE
+    return _DASHBOARD_SQL_BASE.replace(
+        _DASHBOARD_MODE_MARKER,
+        "AS days_pending,\n    t.Recipient_Mode                           AS recipient_mode\nFROM [etransactions].[ETransaction] t",
+        1,
+    )
 
 
 def _normalize_roles(role) -> set:
@@ -772,7 +894,9 @@ def get_dashboard_records(*, role, user_key, accounting_group_key=None):
     authorized groups for at least one of their group-scoped roles.
     """
     where, params = _dashboard_scope_where(role, user_key, accounting_group_key)
-    sql = _DASHBOARD_SQL_BASE
+    # Recipient_Mode is read only once the migrated schema exists (never against an unmigrated database).
+    with_mode = bulk_schema_ready()
+    sql = _dashboard_sql(with_mode)
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY t.Submitted_Date DESC"
@@ -796,6 +920,8 @@ def get_dashboard_records(*, role, user_key, accounting_group_key=None):
         for key in ("treasury_service_date", "prepared_date", "submitted_date", "last_modified_date"):
             val = d.get(key)
             d[key] = val.strftime("%Y-%m-%d") if hasattr(val, "strftime") else (val or "")
+        # '' when Recipient_Mode was not read (unmigrated schema) or is NULL (historical row).
+        d["recipient_mode"] = (d.get("recipient_mode") or "").strip().lower()
         # Decimal → float
         d["amount"] = float(d.get("amount") or 0)
         # Draft rows have no Submitted_Date, so DATEDIFF returns NULL — coerce
@@ -937,6 +1063,7 @@ SELECT
     v.Prior_Transaction_Key                         AS prior_transaction_key,
     priorTxn.Request_ID                             AS prior_request_id,
     t.RecipientBankAccount_Key                      AS recipient_bank_account_key,
+    t.BeneficiaryInstruction_Key                    AS _instruction_key,
     t.OriginatingBankAccount_Key                    AS originating_bank_account_key,
     ba.Status                                       AS originating_bank_account_status,
     rba.Status                                      AS recipient_bank_account_status,
@@ -1074,8 +1201,20 @@ def get_request_detail(request_id: str):
     req   = d.pop("_verbal_requester", False)
     d["verbal_confirmed_with"] = "Known Contact" if known else ("Requester" if req else "")
 
-    # Recipient type is derived ONLY from the persisted maintained-account reference.
-    d["recipient_mode"] = "internal" if d.get("recipient_bank_account_key") else "external"
+    # Recipient type: derived from the persisted relationships; a row with no beneficiary instruction and
+    # no readable Recipient_Mode is reported as "unavailable" rather than guessed to be an External payee.
+    has_instruction = d.pop("_instruction_key", "present") is not None
+    d["recipient_mode"] = effective_recipient_mode(None, d.get("recipient_bank_account_key"), has_instruction)
+    d["bulk_recipient_rows"] = d["bulk_matched_rows"] = 0
+    d["bulk_validated_at"] = d["bulk_listing_sha256"] = ""
+    if bulk_schema_ready():
+        # READ gate (schema present), independent of the BULK_RECIPIENT_ENABLED create switch: existing
+        # Bulk transactions stay accurately visible after the feature is turned off.
+        state = get_bulk_state(request_id=request_id)
+        d["recipient_mode"] = effective_recipient_mode(
+            state["mode"], d.get("recipient_bank_account_key"), has_instruction)
+        d["bulk_recipient_rows"], d["bulk_matched_rows"] = state["recipient_rows"], state["matched_rows"]
+        d["bulk_validated_at"], d["bulk_listing_sha256"] = state["validated_at"], state["listing_sha256"]
 
     d["current_workflow_owner"] = d.get("assigned_approver") or ""
     d["notes_recv"]        = ""   # not yet stored per-instruction
@@ -1100,6 +1239,21 @@ def get_request_detail(request_id: str):
         event_label = f"{friendly_type} by {actor}" if actor else friendly_type
         timeline.append({"date": evt_date, "event": event_label, "status": to_status, "type": dot_type})
     d["timeline"] = timeline
+
+    # The active Request More Information (only while the transaction awaits the requester): the latest
+    # 'more_info' WorkflowEvent already holds the reason, the person who asked, when, and the stage it came from.
+    d["rfi"] = None
+    if d.get("status") == workflow.STATUS_MORE_INFO:
+        asked = [r for r in timeline_rows if (r[0] or "") == workflow.EVENT_RFI_REQUESTED]
+        latest = asked[-1] if asked else None
+        asked_dt = latest[4] if latest else None
+        d["rfi"] = {
+            "reason":        (latest[5] or "").strip() if latest else "",
+            "requested_by":  (latest[6] or "") if latest else "",
+            "requested_at":  asked_dt.strftime("%Y-%m-%d %I:%M %p") if hasattr(asked_dt, "strftime") else "",
+            "requested_dt":  asked_dt if hasattr(asked_dt, "strftime") else None,
+            "origin_status": (latest[7] or "") if latest else "",
+        }
 
     # Build comments list
     comments = []
@@ -1784,12 +1938,13 @@ def get_draft_recipient_bank_account_key(transaction_key, prepared_by_user_key):
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT RecipientBankAccount_Key FROM [etransactions].[ETransaction] "
+            "SELECT RecipientBankAccount_Key, BeneficiaryInstruction_Key FROM [etransactions].[ETransaction] "
             "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
             [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
         )
         row = cur.fetchone()
-        return (False, None) if row is None else (True, row[0])
+        # A bulk-recipient Draft has no stored instruction, so nothing is "kept" if it switches to external.
+        return (False, None) if row is None or row[1] is None else (True, row[0])
     finally:
         conn.close()
 
@@ -2036,6 +2191,273 @@ def resolve_entity_key(classification, *, property_entity_number=None, property_
         conn.close()
 
 
+# ─────────────────────────────────────────────────────────────
+#  Corporate bulk recipients (staged migration — see BULK_RECIPIENT_SCHEMA_CONTRACT.md)
+#
+#  Everything below that touches the new columns/table runs ONLY when the caller passes
+#  data["recipient_mode"] (the app does that only when bulk_recipient_enabled() is true), so an
+#  unmigrated database is never asked about Recipient_Mode / BulkRecipientAccount.
+# ─────────────────────────────────────────────────────────────
+
+RECIPIENT_MODE_DB_EXTERNAL = "External"
+RECIPIENT_MODE_DB_INTERNAL = "Internal"
+RECIPIENT_MODE_DB_BULK = "Bulk"
+BULK_RECIPIENT_ENV = "BULK_RECIPIENT_ENABLED"
+
+_BULK_REQUIRED_TRANSACTION_COLUMNS = frozenset({
+    "Recipient_Mode", "Bulk_Listing_SHA256", "Bulk_Recipient_Count", "Bulk_Listing_Validated_DateTime",
+})
+_BULK_REQUIRED_CHILD_COLUMNS = frozenset({
+    "BulkRecipient_Key", "Transaction_Key", "Line_Number", "BankAccount_Key",
+    "Verification_Outcome", "Verified_DateTime", "Listing_SHA256",
+})
+_BULK_SCHEMA_RECHECK_SECONDS = 60
+_bulk_schema_state = {"ready": False, "checked_at": None}
+
+
+def bulk_schema_ready() -> bool:
+    """
+    True only if the live database already has the bulk-recipient structures: the four new
+    ETransaction columns, the BulkRecipientAccount table, and nullable beneficiary links. A positive
+    answer is cached; a negative or failed check is retried at most once a minute. Fails closed.
+    """
+    now = time.monotonic()
+    if _bulk_schema_state["ready"]:
+        return True
+    last = _bulk_schema_state["checked_at"]
+    if last is not None and now - last < _BULK_SCHEMA_RECHECK_SECONDS:
+        return False
+    _bulk_schema_state["checked_at"] = now
+    try:
+        conn = get_connection()
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT TABLE_NAME, COLUMN_NAME, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS "
+                "WHERE TABLE_SCHEMA = 'etransactions' AND TABLE_NAME IN ('ETransaction', 'BulkRecipientAccount')"
+            )
+            rows = cur.fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return False
+    txn_cols = {r[1] for r in rows if r[0] == "ETransaction"}
+    child_cols = {r[1] for r in rows if r[0] == "BulkRecipientAccount"}
+    nullable_links = {r[1] for r in rows if r[0] == "ETransaction" and r[2] == "YES"}
+    ready = (
+        _BULK_REQUIRED_TRANSACTION_COLUMNS <= txn_cols
+        and _BULK_REQUIRED_CHILD_COLUMNS <= child_cols
+        and {"Beneficiary_Key", "BeneficiaryInstruction_Key"} <= nullable_links
+    )
+    _bulk_schema_state["ready"] = ready
+    return ready
+
+
+def bulk_recipient_enabled() -> bool:
+    """
+    CREATE gate: BULK_RECIPIENT_ENABLED=true AND the migrated schema is present (default OFF). Governs only
+    whether NEW bulk requests may be created or finalized; reading existing Bulk rows needs only
+    bulk_schema_ready().
+    """
+    if (os.environ.get(BULK_RECIPIENT_ENV, "false") or "").strip().lower() != "true":
+        return False
+    return bulk_schema_ready()
+
+
+def effective_recipient_mode(stored_mode, recipient_bank_account_key, has_instruction=True) -> str:
+    """
+    'external' | 'internal' | 'bulk' | 'unavailable'. A NULL stored mode (historical rows) is read from the
+    existing relationships; a row with no beneficiary instruction and no stored mode is 'unavailable' —
+    never guessed to be External.
+    """
+    stored = (stored_mode or "").strip().lower()
+    if stored in ("external", "internal", "bulk"):
+        return stored
+    if not has_instruction and not recipient_bank_account_key:
+        return "unavailable"
+    return "internal" if recipient_bank_account_key else "external"
+
+
+def match_bulk_recipient_accounts(pairs):
+    """
+    For each (account_number, routing_number) return the BankAccount rows it matches, as
+    [{"bank_account_key", "status"}, ...]. The comparison runs inside SQL (the account/routing columns
+    are Dynamic Data Masking columns; only keys and status ever leave the database).
+    """
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        results = []
+        for account, routing in pairs:
+            cur.execute(
+                "SELECT BankAccount_Key, Status FROM [etransactions].[BankAccount] "
+                "WHERE AccountNumber = ? AND RoutingNumber = ?",
+                [account, routing],
+            )
+            results.append([{"bank_account_key": r[0], "status": r[1]} for r in cur.fetchall()])
+        return results
+    finally:
+        conn.close()
+
+
+def _insert_beneficiary_and_instruction(cur, data, today, *, require_routing):
+    """
+    Create the Beneficiary + BeneficiaryBankInstruction rows for a SINGLE-recipient transaction and
+    return (beneficiary_key, instruction_key, recipient_bank_account_key). Internal recipient: the
+    instruction is a transaction-time snapshot of the maintained BankAccount, read server-side.
+    """
+    recipient_key = data.get("recipient_bank_account_key") or None
+    if recipient_key:
+        snap = _load_internal_recipient_snapshot(
+            cur, recipient_key, data.get("bank_account_key"), require_routing=require_routing)
+        recv_bank_name, recv_account_name = snap["bank_name"], snap["account_name"]
+        recv_account_number, recv_routing_number = snap["account_number"], snap["routing_number"]
+        recv_bank_address = snap["address"]
+    else:
+        recv_bank_name, recv_account_name = data["recv_bank_name"], data.get("recv_account_name", "")
+        recv_account_number, recv_routing_number = data["recv_account_number"], data.get("recv_routing_number", "")
+        recv_bank_address = data.get("recv_bank_address", "")
+
+    cur.execute(
+        "INSERT INTO [etransactions].[Beneficiary] "
+        "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
+        "OUTPUT INSERTED.Beneficiary_Key VALUES (?, ?, ?, ?)",
+        [data["recv_payee_name"], data.get("recv_contact_name", ""),
+         data.get("recv_contact_email", ""), data.get("recv_contact_phone", "")],
+    )
+    ben_key = cur.fetchone()[0]
+    cur.execute(
+        "INSERT INTO [etransactions].[BeneficiaryBankInstruction] "
+        "(Beneficiary_Key, Receiving_Bank_Name, Receiving_Account_Name, "
+        " Receiving_Account_Number, Receiving_Routing_Number, "
+        " Bank_Beneficiary_Address, Is_Current, Effective_From) "
+        "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
+        [ben_key, recv_bank_name, recv_account_name,
+         recv_account_number, recv_routing_number,
+         recv_bank_address, today],
+    )
+    return ben_key, cur.fetchone()[0], recipient_key
+
+
+def _delete_beneficiary_rows(cur, ben_key, bi_key):
+    """Remove a Draft's own single-recipient rows once the transaction no longer references them."""
+    if bi_key is not None:
+        cur.execute("DELETE FROM [etransactions].[BeneficiaryBankInstruction] WHERE BeneficiaryInstruction_Key = ?", [bi_key])
+    if ben_key is not None:
+        cur.execute("DELETE FROM [etransactions].[Beneficiary] WHERE Beneficiary_Key = ?", [ben_key])
+
+
+def _replace_bulk_recipients(cur, transaction_key, recipients, sha256, now):
+    """Replace the transaction's verified bulk recipients (empty list = clear, which also clears the batch metadata)."""
+    cur.execute("DELETE FROM [etransactions].[BulkRecipientAccount] WHERE Transaction_Key = ?", [transaction_key])
+    for r in recipients:
+        cur.execute(
+            "INSERT INTO [etransactions].[BulkRecipientAccount] "
+            "(Transaction_Key, Line_Number, BankAccount_Key, Verification_Outcome, Verified_DateTime, Listing_SHA256) "
+            "VALUES (?,?,?,?,?,?)",
+            [transaction_key, r["line"], r["bank_account_key"], "Matched", now, sha256],
+        )
+    cur.execute(
+        "UPDATE [etransactions].[ETransaction] SET Bulk_Listing_SHA256 = ?, Bulk_Recipient_Count = ?, "
+        "Bulk_Listing_Validated_DateTime = ? WHERE Transaction_Key = ?",
+        [sha256 if recipients else None, len(recipients) or None, now if recipients else None, transaction_key],
+    )
+
+
+def _assert_bulk_recipients_eligible(cur, recipients, sha256, originating_key):
+    """
+    Last check inside the submitting SQL transaction, before any workflow row exists: the verified recipients
+    must be present, distinct, still Open and not the originating account, so a BankAccount closed (or made the
+    originating account) after the listing was verified cannot be finalized on a stale verification. The
+    transaction's isolation (snapshot) cannot stop a change committed after this read; see the schema contract.
+    """
+    keys = [r["bank_account_key"] for r in recipients or []]
+    if not keys or not sha256 or len(set(keys)) != len(keys):
+        raise InternalRecipientError("The bulk recipient listing has no verified recipients. Please verify the listing again.")
+    cur.execute(
+        "SELECT COUNT(*) FROM [etransactions].[BankAccount] "
+        f"WHERE BankAccount_Key IN ({','.join('?' for _ in keys)}) AND Status = 'Open' AND BankAccount_Key <> ?",
+        [*keys, originating_key],
+    )
+    if cur.fetchone()[0] != len(keys):
+        raise InternalRecipientError(
+            "One or more bulk recipient accounts are no longer eligible (closed or changed). "
+            "Please verify the listing again.")
+
+
+def _save_recipient_mode_state(cur, transaction_key, data, now, *, submit=False):
+    """Persist Recipient_Mode and the verified bulk recipients — only when the app supplied a mode."""
+    mode = data.get("recipient_mode")
+    if not mode:
+        return
+    if submit and mode == RECIPIENT_MODE_DB_BULK:
+        _assert_bulk_recipients_eligible(
+            cur, data.get("bulk_recipients"), data.get("bulk_listing_sha256"), data.get("bank_account_key"))
+    cur.execute(
+        "UPDATE [etransactions].[ETransaction] SET Recipient_Mode = ? WHERE Transaction_Key = ?",
+        [mode, transaction_key],
+    )
+    recipients = data.get("bulk_recipients") if mode == RECIPIENT_MODE_DB_BULK else []
+    _replace_bulk_recipients(cur, transaction_key, recipients or [], data.get("bulk_listing_sha256"), now)
+
+
+def set_draft_bulk_recipients(transaction_key, prepared_by_user_key, recipients, sha256):
+    """Store (or, with an empty list, clear) a Draft's verified bulk recipients. Owner- and Draft-guarded."""
+    now = datetime.now()
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM [etransactions].[ETransaction] "
+            "WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
+            [transaction_key, prepared_by_user_key, workflow.STATUS_DRAFT],
+        )
+        if cur.fetchone() is None:
+            raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
+        _replace_bulk_recipients(cur, transaction_key, recipients, sha256, now)
+        conn.commit()
+    except DraftNotEditableError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def get_bulk_state(transaction_key=None, *, request_id=None):
+    """
+    {"mode", "listing_sha256", "recipient_rows", "matched_rows", "validated_at"} for a transaction (by
+    Transaction_Key or Request_ID), read only when the bulk schema exists (callers check
+    bulk_recipient_enabled() first). mode is the stored Recipient_Mode ('' for historical rows).
+    """
+    where, param = ("t.Transaction_Key = ?", transaction_key) if transaction_key is not None else ("t.Request_ID = ?", request_id)
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT t.Recipient_Mode, t.Bulk_Listing_SHA256, t.Bulk_Recipient_Count, t.Bulk_Listing_Validated_DateTime, "
+            "       (SELECT COUNT(*) FROM [etransactions].[BulkRecipientAccount] b "
+            "        WHERE b.Transaction_Key = t.Transaction_Key AND b.Verification_Outcome = 'Matched') "
+            f"FROM [etransactions].[ETransaction] t WHERE {where}",
+            [param],
+        )
+        row = cur.fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return {"mode": "", "listing_sha256": "", "recipient_rows": 0, "matched_rows": 0, "validated_at": ""}
+    validated = row[3]
+    return {
+        "mode": row[0] or "",
+        "listing_sha256": row[1] or "",
+        "recipient_rows": int(row[2] or 0),
+        "matched_rows": int(row[4] or 0),
+        "validated_at": validated.strftime("%Y-%m-%d %I:%M %p") if hasattr(validated, "strftime") else "",
+    }
+
+
+
 def insert_transaction(data: dict) -> str:
     """
     Insert all rows for a new transaction in a single transaction.
@@ -2075,40 +2497,12 @@ def insert_transaction(data: dict) -> str:
         # SNAPSHOT of the maintained BankAccount, read server-side inside this
         # transaction (Open status re-checked, masked placeholders rejected).
         # External recipient: the requester's entered values, exactly as before.
-        recipient_key = data.get("recipient_bank_account_key") or None
-        if recipient_key:
-            snap = _load_internal_recipient_snapshot(
-                cur, recipient_key, data.get("bank_account_key"), require_routing=data["request_type"] == "ACH")
-            recv_bank_name, recv_account_name = snap["bank_name"], snap["account_name"]
-            recv_account_number, recv_routing_number = snap["account_number"], snap["routing_number"]
-            recv_bank_address = snap["address"]
+        # Bulk recipients have no single beneficiary: no Beneficiary/instruction rows at all.
+        if data.get("recipient_mode") == RECIPIENT_MODE_DB_BULK:
+            recipient_key = ben_key = bi_key = None
         else:
-            recv_bank_name, recv_account_name = data["recv_bank_name"], data["recv_account_name"]
-            recv_account_number, recv_routing_number = data["recv_account_number"], data["recv_routing_number"]
-            recv_bank_address = data.get("recv_bank_address", "")
-
-        # Insert Beneficiary (payee)
-        cur.execute(
-            "INSERT INTO [etransactions].[Beneficiary] "
-            "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
-            "OUTPUT INSERTED.Beneficiary_Key VALUES (?, ?, ?, ?)",
-            [data["recv_payee_name"], data.get("recv_contact_name", ""),
-             data.get("recv_contact_email", ""), data.get("recv_contact_phone", "")],
-        )
-        ben_key = cur.fetchone()[0]
-
-        # Insert BeneficiaryBankInstruction (receiving bank)
-        cur.execute(
-            "INSERT INTO [etransactions].[BeneficiaryBankInstruction] "
-            "(Beneficiary_Key, Receiving_Bank_Name, Receiving_Account_Name, "
-            " Receiving_Account_Number, Receiving_Routing_Number, "
-            " Bank_Beneficiary_Address, Is_Current, Effective_From) "
-            "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            [ben_key, recv_bank_name, recv_account_name,
-             recv_account_number, recv_routing_number,
-             recv_bank_address, today],
-        )
-        bi_key = cur.fetchone()[0]
+            ben_key, bi_key, recipient_key = _insert_beneficiary_and_instruction(
+                cur, data, today, require_routing=data["request_type"] == "ACH")
 
         # Use the caller's pre-reserved Request_ID if provided, else generate one now.
         request_id = data.get("request_id") or _generate_unique_request_id(cur)
@@ -2180,6 +2574,9 @@ def insert_transaction(data: dict) -> str:
             ],
         )
         txn_key = cur.fetchone()[0]
+
+        # Recipient mode + verified bulk recipients (only when the bulk schema is in use).
+        _save_recipient_mode_state(cur, txn_key, data, now, submit=True)
 
         # Insert TransactionVerification
         cur.execute(
@@ -2401,37 +2798,11 @@ def create_draft(data: dict):
         # Internal recipient: snapshot the maintained BankAccount now (the Draft's
         # NOT NULL Beneficiary/Instruction rows need real values); finalize
         # re-reads the account and refreshes this snapshot before submission.
-        recipient_key = data.get("recipient_bank_account_key") or None
-        if recipient_key:
-            snap = _load_internal_recipient_snapshot(cur, recipient_key, data.get("bank_account_key"))
-            recv_bank_name, recv_account_name = snap["bank_name"], snap["account_name"]
-            recv_account_number, recv_routing_number = snap["account_number"], snap["routing_number"]
-            recv_bank_address = snap["address"]
+        # Bulk recipients have no single beneficiary: no Beneficiary/instruction rows at all.
+        if data.get("recipient_mode") == RECIPIENT_MODE_DB_BULK:
+            recipient_key = ben_key = bi_key = None
         else:
-            recv_bank_name, recv_account_name = data["recv_bank_name"], data.get("recv_account_name", "")
-            recv_account_number, recv_routing_number = data["recv_account_number"], data.get("recv_routing_number", "")
-            recv_bank_address = data.get("recv_bank_address", "")
-
-        cur.execute(
-            "INSERT INTO [etransactions].[Beneficiary] "
-            "(Payee_Name, Contact_Name, Contact_Email, Contact_Phone) "
-            "OUTPUT INSERTED.Beneficiary_Key VALUES (?, ?, ?, ?)",
-            [data["recv_payee_name"], data.get("recv_contact_name", ""),
-             data.get("recv_contact_email", ""), data.get("recv_contact_phone", "")],
-        )
-        ben_key = cur.fetchone()[0]
-
-        cur.execute(
-            "INSERT INTO [etransactions].[BeneficiaryBankInstruction] "
-            "(Beneficiary_Key, Receiving_Bank_Name, Receiving_Account_Name, "
-            " Receiving_Account_Number, Receiving_Routing_Number, "
-            " Bank_Beneficiary_Address, Is_Current, Effective_From) "
-            "OUTPUT INSERTED.BeneficiaryInstruction_Key VALUES (?, ?, ?, ?, ?, ?, 1, ?)",
-            [ben_key, recv_bank_name, recv_account_name,
-             recv_account_number, recv_routing_number,
-             recv_bank_address, today],
-        )
-        bi_key = cur.fetchone()[0]
+            ben_key, bi_key, recipient_key = _insert_beneficiary_and_instruction(cur, data, today, require_routing=False)
 
         request_id = data.get("request_id") or _generate_unique_request_id(cur)
 
@@ -2466,6 +2837,8 @@ def create_draft(data: dict):
             ],
         )
         txn_key = cur.fetchone()[0]
+
+        _save_recipient_mode_state(cur, txn_key, data, now)
 
         # Verification entered so far travels with the Draft (no workflow side effects).
         if "instructions_previously_used" in data:
@@ -2522,48 +2895,64 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
             raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
         ben_key, bi_key = row
 
-        cur.execute(
-            "UPDATE [etransactions].[Beneficiary] "
-            "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
-            "WHERE Beneficiary_Key = ?",
-            [data["recv_payee_name"], data.get("recv_contact_name", ""),
-             data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
-        )
-
+        bulk = data.get("recipient_mode") == RECIPIENT_MODE_DB_BULK
+        new_links = None       # (beneficiary_key, instruction_key) to store when the single-recipient rows change
+        orphaned_rows = None   # this Draft's own rows to delete once ETransaction no longer references them
         recipient_key = data.get("recipient_bank_account_key") or None
-        if recipient_key:
-            # Internal recipient: always refresh the whole snapshot from the
-            # maintained account (never "keep existing") — also covers a Draft
-            # switching from an external to an internal recipient.
-            snap = _load_internal_recipient_snapshot(cur, recipient_key, data.get("bank_account_key"))
-            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
-                      "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
-            bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
-                         snap["account_number"], snap["routing_number"]]
+
+        if bulk:
+            # Bulk recipients have no single beneficiary: detach (and later delete) any rows an earlier save made.
+            recipient_key = None
+            if ben_key is not None or bi_key is not None:
+                new_links, orphaned_rows = (None, None), (ben_key, bi_key)
+        elif ben_key is None or bi_key is None:
+            # A bulk Draft switching to a single recipient: it has no rows yet, so create them.
+            new_ben, new_bi, recipient_key = _insert_beneficiary_and_instruction(
+                cur, data, now.date(), require_routing=False)
+            new_links = (new_ben, new_bi)
         else:
-            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
-            bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
-            # Blank account/routing number means "keep the existing stored value" —
-            # never overwrite a real value with a blank/placeholder (Batch 3 principle).
-            # app.py never lets a blank through for a Draft that was previously an
-            # INTERNAL recipient (its stored values are a snapshot, not the requester's).
-            if (data.get("recv_account_number") or "").strip():
-                bi_set.append("Receiving_Account_Number = ?")
-                bi_params.append(data["recv_account_number"])
-            if (data.get("recv_routing_number") or "").strip():
-                bi_set.append("Receiving_Routing_Number = ?")
-                bi_params.append(data["recv_routing_number"])
-        bi_params.append(bi_key)
-        cur.execute(
-            f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
-            "WHERE BeneficiaryInstruction_Key = ?",
-            bi_params,
-        )
+            cur.execute(
+                "UPDATE [etransactions].[Beneficiary] "
+                "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
+                "WHERE Beneficiary_Key = ?",
+                [data["recv_payee_name"], data.get("recv_contact_name", ""),
+                 data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
+            )
+
+            if recipient_key:
+                # Internal recipient: always refresh the whole snapshot from the
+                # maintained account (never "keep existing") — also covers a Draft
+                # switching from an external to an internal recipient.
+                snap = _load_internal_recipient_snapshot(cur, recipient_key, data.get("bank_account_key"))
+                bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
+                          "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
+                bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
+                             snap["account_number"], snap["routing_number"]]
+            else:
+                bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+                bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+                # Blank account/routing number means "keep the existing stored value" —
+                # never overwrite a real value with a blank/placeholder (Batch 3 principle).
+                # app.py never lets a blank through for a Draft that was previously an
+                # INTERNAL recipient (its stored values are a snapshot, not the requester's).
+                if (data.get("recv_account_number") or "").strip():
+                    bi_set.append("Receiving_Account_Number = ?")
+                    bi_params.append(data["recv_account_number"])
+                if (data.get("recv_routing_number") or "").strip():
+                    bi_set.append("Receiving_Routing_Number = ?")
+                    bi_params.append(data["recv_routing_number"])
+            bi_params.append(bi_key)
+            cur.execute(
+                f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
+                "WHERE BeneficiaryInstruction_Key = ?",
+                bi_params,
+            )
 
         cur.execute(
             "UPDATE [etransactions].[ETransaction] SET"
             "  Property_Department_Text = ?, Entity_ID_Text = ?,"
             + ("  Entity_Key = ?," if classification else "")
+            + ("  Beneficiary_Key = ?, BeneficiaryInstruction_Key = ?," if new_links else "")
             + "  OriginatingBankAccount_Key = ?, RecipientBankAccount_Key = ?,"
             "  SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?,"
@@ -2573,6 +2962,7 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
             [
                 data.get("property_dept", ""), data.get("property_code", ""),
                 *([entity_key] if classification else []),
+                *(list(new_links) if new_links else []),
                 data["bank_account_key"], recipient_key, data["approver_key"], data["controller_key"],
                 data["request_type"], data["treasury_service_date"],
                 data["amount"], data.get("currency", "USD"), data.get("payment_purpose", ""),
@@ -2583,6 +2973,11 @@ def update_draft(transaction_key, data: dict, *, prepared_by_user_key) -> None:
         if cur.rowcount == 0:
             conn.rollback()
             raise DraftNotEditableError("This draft could not be found, is not yours, or is no longer editable.")
+
+        if orphaned_rows:
+            _delete_beneficiary_rows(cur, *orphaned_rows)
+
+        _save_recipient_mode_state(cur, transaction_key, data, now)
 
         if "instructions_previously_used" in data:
             _upsert_transaction_verification(cur, transaction_key, data, prepared_by_user_key, now)
@@ -2632,8 +3027,8 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
                    v.Verbal_Contact_Name, v.Verbal_Confirm_DateTime, v.AVS_Score,
                    v.External_Source_Flag, v.Internal_Doc_Not_Used_Flag
             FROM [etransactions].[ETransaction] t
-            JOIN [etransactions].[Beneficiary] b ON b.Beneficiary_Key = t.Beneficiary_Key
-            JOIN [etransactions].[BeneficiaryBankInstruction] bi ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
+            LEFT JOIN [etransactions].[Beneficiary] b ON b.Beneficiary_Key = t.Beneficiary_Key
+            LEFT JOIN [etransactions].[BeneficiaryBankInstruction] bi ON bi.BeneficiaryInstruction_Key = t.BeneficiaryInstruction_Key
             LEFT JOIN [etransactions].[BusinessEntity] be ON be.Entity_Key = t.Entity_Key
             LEFT JOIN [etransactions].[TransactionVerification] v ON v.Transaction_Key = t.Transaction_Key
             LEFT JOIN [etransactions].[ETransaction] priorTxn ON priorTxn.Transaction_Key = v.Prior_Transaction_Key
@@ -2650,7 +3045,7 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
         conn.close()
 
     classification = (d["Classification"] or "").strip().lower()
-    return {
+    draft = {
         "transaction_key":  d["Transaction_Key"],
         "request_id":       d["Request_ID"],
         "property_dept":    d["Property_Department_Text"] or "",
@@ -2697,7 +3092,15 @@ def get_draft_for_edit(transaction_key, *, prepared_by_user_key):
         "avs_score":        _avs_score_text(d["AVS_Score"]),
         "external_source":  bool(d["External_Source_Flag"]),
         "internal_doc_not_used": bool(d["Internal_Doc_Not_Used_Flag"]),
+        "bulk_recipient_rows": 0, "bulk_matched_rows": 0, "bulk_validated": False,
     }
+    if bulk_schema_ready():
+        state = get_bulk_state(draft["transaction_key"])
+        draft["recipient_mode"] = effective_recipient_mode(state["mode"], d["RecipientBankAccount_Key"])
+        draft["bulk_recipient_rows"] = state["recipient_rows"]
+        draft["bulk_matched_rows"] = state["matched_rows"]
+        draft["bulk_validated"] = state["matched_rows"] > 0 and state["matched_rows"] == state["recipient_rows"]
+    return draft
 
 
 def _draft_originating_bank_account_summary(bank_account_key):
@@ -2775,47 +3178,62 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             )
         ben_key, bi_key = row
 
-        cur.execute(
-            "UPDATE [etransactions].[Beneficiary] "
-            "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
-            "WHERE Beneficiary_Key = ?",
-            [data["recv_payee_name"], data.get("recv_contact_name", ""),
-             data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
-        )
-
+        bulk = data.get("recipient_mode") == RECIPIENT_MODE_DB_BULK
+        new_links = None
+        orphaned_rows = None
         recipient_key = data.get("recipient_bank_account_key") or None
-        if recipient_key:
-            # Internal recipient: re-read the CURRENT maintained account inside
-            # this transaction (Open status re-validated, real values only) and
-            # make it the final snapshot. After this commit nothing ever updates
-            # these rows again (both draft writers are guarded by Current_Status='Draft'),
-            # so later BankAccount edits cannot change the historical instructions.
-            snap = _load_internal_recipient_snapshot(
-                cur, recipient_key, data.get("bank_account_key"), require_routing=data["request_type"] == "ACH")
-            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
-                      "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
-            bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
-                         snap["account_number"], snap["routing_number"]]
+
+        if bulk:
+            recipient_key = None
+            if ben_key is not None or bi_key is not None:
+                new_links, orphaned_rows = (None, None), (ben_key, bi_key)
+        elif ben_key is None or bi_key is None:
+            # A bulk Draft finalized as a single recipient: create the rows now.
+            new_ben, new_bi, recipient_key = _insert_beneficiary_and_instruction(
+                cur, data, today, require_routing=data["request_type"] == "ACH")
+            new_links = (new_ben, new_bi)
         else:
-            bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
-            bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
-            if (data.get("recv_account_number") or "").strip():
-                bi_set.append("Receiving_Account_Number = ?")
-                bi_params.append(data["recv_account_number"])
-            if (data.get("recv_routing_number") or "").strip():
-                bi_set.append("Receiving_Routing_Number = ?")
-                bi_params.append(data["recv_routing_number"])
-        bi_params.append(bi_key)
-        cur.execute(
-            f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
-            "WHERE BeneficiaryInstruction_Key = ?",
-            bi_params,
-        )
+            cur.execute(
+                "UPDATE [etransactions].[Beneficiary] "
+                "SET Payee_Name = ?, Contact_Name = ?, Contact_Email = ?, Contact_Phone = ? "
+                "WHERE Beneficiary_Key = ?",
+                [data["recv_payee_name"], data.get("recv_contact_name", ""),
+                 data.get("recv_contact_email", ""), data.get("recv_contact_phone", ""), ben_key],
+            )
+
+            if recipient_key:
+                # Internal recipient: re-read the CURRENT maintained account inside
+                # this transaction (Open status re-validated, real values only) and
+                # make it the final snapshot. After this commit nothing ever updates
+                # these rows again (both draft writers are guarded by Current_Status='Draft'),
+                # so later BankAccount edits cannot change the historical instructions.
+                snap = _load_internal_recipient_snapshot(
+                    cur, recipient_key, data.get("bank_account_key"), require_routing=data["request_type"] == "ACH")
+                bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?",
+                          "Receiving_Account_Number = ?", "Receiving_Routing_Number = ?"]
+                bi_params = [snap["bank_name"], snap["account_name"], snap["address"],
+                             snap["account_number"], snap["routing_number"]]
+            else:
+                bi_set = ["Receiving_Bank_Name = ?", "Receiving_Account_Name = ?", "Bank_Beneficiary_Address = ?"]
+                bi_params = [data["recv_bank_name"], data.get("recv_account_name", ""), data.get("recv_bank_address", "")]
+                if (data.get("recv_account_number") or "").strip():
+                    bi_set.append("Receiving_Account_Number = ?")
+                    bi_params.append(data["recv_account_number"])
+                if (data.get("recv_routing_number") or "").strip():
+                    bi_set.append("Receiving_Routing_Number = ?")
+                    bi_params.append(data["recv_routing_number"])
+            bi_params.append(bi_key)
+            cur.execute(
+                f"UPDATE [etransactions].[BeneficiaryBankInstruction] SET {', '.join(bi_set)} "
+                "WHERE BeneficiaryInstruction_Key = ?",
+                bi_params,
+            )
 
         cur.execute(
             "UPDATE [etransactions].[ETransaction] SET"
             "  Property_Department_Text = ?, Entity_ID_Text = ?, Entity_Key = ?,"
-            "  OriginatingBankAccount_Key = ?, RecipientBankAccount_Key = ?,"
+            + ("  Beneficiary_Key = ?, BeneficiaryInstruction_Key = ?," if new_links else "")
+            + "  OriginatingBankAccount_Key = ?, RecipientBankAccount_Key = ?,"
             "  SelectedApprover_User_Key = ?, SelectedController_User_Key = ?,"
             "  CurrentOwner_User_Key = ?, ApprovalRule_Key = ?,"
             "  Request_Type = ?, Treasury_Service_Date = ?, Submitted_Date = ?,"
@@ -2827,6 +3245,7 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             " WHERE Transaction_Key = ? AND PreparedBy_User_Key = ? AND Current_Status = ?",
             [
                 data.get("property_dept", ""), data.get("property_code", ""), entity_key,
+                *(list(new_links) if new_links else []),
                 data["bank_account_key"], recipient_key, data["approver_key"], data["controller_key"],
                 data["approver_key"], data["approval_rule_key"],
                 data["request_type"], data["treasury_service_date"], now,
@@ -2843,6 +3262,12 @@ def finalize_draft_submission(transaction_key, data: dict, *, prepared_by_user_k
             raise WorkflowConflictError(
                 "This draft could not be found, is not yours, or has already been submitted."
             )
+
+        if orphaned_rows:
+            _delete_beneficiary_rows(cur, *orphaned_rows)
+
+        # Recipient mode + the bulk recipients verified against the listing just re-read by the caller.
+        _save_recipient_mode_state(cur, transaction_key, data, now, submit=True)
 
         _upsert_transaction_verification(cur, transaction_key, data, prepared_by_user_key, now)
 

@@ -604,12 +604,16 @@ class DraftSnapshotDbTests(unittest.TestCase):
 
     def test_12h_get_draft_recipient_key_reports_found_and_key(self):
         cur = MagicMock()
-        cur.fetchone.return_value = (9,)
+        cur.fetchone.return_value = (9, 70)
         with patch.object(db, "get_connection", return_value=_conn(cur)):
             self.assertEqual(db.get_draft_recipient_bank_account_key(55, 11), (True, 9))
-        cur.fetchone.return_value = (None,)
+        cur.fetchone.return_value = (None, 70)
         with patch.object(db, "get_connection", return_value=_conn(cur)):
             self.assertEqual(db.get_draft_recipient_bank_account_key(55, 11), (True, None))
+        # A bulk-recipient Draft has no stored single-recipient instruction.
+        cur.fetchone.return_value = (None, None)
+        with patch.object(db, "get_connection", return_value=_conn(cur)):
+            self.assertEqual(db.get_draft_recipient_bank_account_key(55, 11), (False, None))
         cur.fetchone.return_value = None
         with patch.object(db, "get_connection", return_value=_conn(cur)):
             self.assertEqual(db.get_draft_recipient_bank_account_key(55, 11), (False, None))

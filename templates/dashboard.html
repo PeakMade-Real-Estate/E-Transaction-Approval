@@ -28,6 +28,17 @@
     {% endif %}
 </div>
 
+{% if stats.awaiting_my_response %}
+<div class="alert alert-warning d-flex align-items-center gap-2 mb-4" role="status" id="response-required-banner">
+    <i class="fas fa-exclamation-circle"></i>
+    <div>
+        <strong>{{ stats.awaiting_my_response }}</strong>
+        request{{ 's need' if stats.awaiting_my_response != 1 else ' needs' }} your response.
+        <a href="{{ url_for('dashboard', status='More Information Requested') }}" class="alert-link">Show them</a>
+    </div>
+</div>
+{% endif %}
+
 <!-- ── Summary Stat Cards ─────────────────────────────────────── -->
 <div class="row g-3 mb-4">
 
@@ -393,6 +404,9 @@
                     <!-- Type -->
                     <td>
                         <span class="badge bg-light text-dark border">{{ req.request_type }}</span>
+                        {% if req.recipient_mode == 'bulk' %}
+                        <span class="badge bg-primary ms-1 bulk-recipients-badge" title="Bulk recipients &mdash; attached listing"><i class="fas fa-list"></i> Bulk Recipients</span>
+                        {% endif %}
                     </td>
 
                     <!-- Property -->
@@ -419,6 +433,11 @@
                         <span class="badge {{ req.status | status_badge_class }} text-wrap">
                             {{ req.status }}
                         </span>
+                        {% if req.response_required %}
+                        <div class="small fw-semibold text-danger mt-1 response-required-cue">
+                            <i class="fas fa-exclamation-circle"></i> Your response is required
+                        </div>
+                        {% endif %}
                     </td>
 
                     <!-- Flags -->
@@ -456,6 +475,12 @@
                            class="btn btn-sm btn-outline-secondary"
                            title="Resume Draft">
                             <i class="fas fa-pen"></i> Resume
+                        </a>
+                        {% elif req.response_required %}
+                        <a href="{{ url_for('request_detail', request_id=req.request_id, _anchor='additional-information-requested') }}"
+                           class="btn btn-sm btn-warning text-dark response-required-action"
+                           title="Open this request and respond to the information requested">
+                            <i class="fas fa-reply"></i> Respond
                         </a>
                         {% else %}
                         <a href="{{ url_for('request_detail', request_id=req.request_id) }}"

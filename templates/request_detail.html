@@ -52,6 +52,104 @@
 </div>
 {% endif %}
 
+{% if record.get('rfi') is not none %}
+<!-- ── Additional Information Requested (active RFI) ─────────── -->
+<section id="additional-information-requested" class="card border-warning border-2 shadow mb-4"
+         aria-labelledby="rfi-heading" tabindex="-1">
+    <div class="card-header bg-warning text-dark d-flex flex-wrap align-items-center gap-2">
+        <i class="fas fa-question-circle fa-lg"></i>
+        <h3 id="rfi-heading" class="h5 fw-bold mb-0">Additional Information Requested</h3>
+        {% if record.can_respond_rfi %}
+        <span class="badge bg-danger ms-sm-auto">Action required &mdash; your response</span>
+        {% else %}
+        <span class="badge bg-secondary ms-sm-auto">Waiting for the requester</span>
+        {% endif %}
+    </div>
+    <div class="card-body">
+        <dl class="row small mb-3" id="rfi-details">
+            <dt class="col-sm-3">Requested by</dt>
+            <dd class="col-sm-9">{{ record.rfi.requested_by or '&mdash;'|safe }}</dd>
+            <dt class="col-sm-3">Requested on</dt>
+            <dd class="col-sm-9">{{ record.rfi.requested_at or '&mdash;'|safe }}</dd>
+            <dt class="col-sm-3">Response goes to</dt>
+            <dd class="col-sm-9">
+                {{ record.rfi.return_role or 'Reviewer' }}{% if record.rfi.return_to %} &mdash; {{ record.rfi.return_to }}{% endif %}
+                <span class="text-muted">(status after you respond: {{ record.rfi.return_status }})</span>
+            </dd>
+        </dl>
+        <div class="fw-semibold small text-uppercase text-muted mb-1">What was asked</div>
+        <blockquote class="border-start border-warning border-4 ps-3 py-2 bg-light mb-3" id="rfi-requested-reason" style="white-space: pre-wrap;">{% if record.rfi.reason %}{{ record.rfi.reason }}{% else %}<span class="text-muted">No description was recorded with this request.</span>{% endif %}</blockquote>
+
+        {% if record.can_respond_rfi %}
+        <hr>
+        <form id="rfi-response-form" method="POST"
+              action="{{ url_for('request_action', request_id=record.request_id) }}"
+              enctype="multipart/form-data" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <input type="hidden" name="action" value="requester_respond">
+            <h4 class="h6 fw-bold">Your response</h4>
+            <div class="alert alert-info small py-2">
+                <i class="fas fa-info-circle me-1"></i>
+                Typing a comment or choosing files does <strong>not</strong> send anything. Your response is returned for
+                review only when you select <strong>Submit Additional Information</strong> below.
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold" for="rfi-response-comment">
+                    Additional information <span class="text-muted fw-normal">(a comment, documents, or both)</span>
+                </label>
+                <textarea class="form-control" id="rfi-response-comment" name="comment" rows="4"
+                          aria-describedby="rfi-response-error"
+                          placeholder="Describe what was corrected or provided...">{{ record.rfi_response_text }}</textarea>
+            </div>
+
+            <div class="mb-3">
+                <label class="form-label fw-semibold" for="rfi-response-files">Supporting documents</label>
+                <input type="file" class="form-control" id="rfi-response-files" name="resubmit_file" multiple
+                       aria-describedby="rfi-files-help">
+                <div id="rfi-files-help" class="form-text">
+                    Files chosen here are uploaded together with your response when you submit it.
+                </div>
+                <ul class="small mb-0 mt-2" id="rfi-selected-files" aria-live="polite"></ul>
+            </div>
+
+            {% if record.rfi.new_attachments %}
+            <div class="alert alert-secondary small py-2" id="rfi-stored-files" data-count="{{ record.rfi.new_attachments | length }}">
+                <div class="fw-semibold mb-1">
+                    <i class="fas fa-paperclip me-1"></i>Already uploaded since this request was made
+                    ({{ record.rfi.new_attachments | length }})
+                </div>
+                <ul class="mb-1">
+                    {% for name in record.rfi.new_attachments %}<li>{{ name }}</li>{% endfor %}
+                </ul>
+                These files are stored on the transaction, but <strong>your response has not been submitted yet</strong>.
+            </div>
+            {% endif %}
+
+            <div id="rfi-response-error" class="text-danger small mb-2" role="alert" style="display:none;">
+                Add a comment or choose a document before submitting your response.
+            </div>
+            <div class="d-flex flex-wrap align-items-center gap-3">
+                <button type="submit" class="btn btn-warning btn-lg text-dark fw-bold" id="rfi-response-submit">
+                    <i class="fas fa-paper-plane me-1"></i>Submit Additional Information
+                </button>
+                <span class="small text-muted">
+                    Sends your response to the {{ record.rfi.return_role or 'reviewer' }} for review.
+                    Approvals already completed are kept.
+                </span>
+            </div>
+        </form>
+        {% else %}
+        <p class="small text-muted mb-0" id="rfi-no-action">
+            <i class="fas fa-hourglass-half me-1"></i>
+            This transaction is waiting for {{ record.prepared_by or 'the requester' }} to provide the information above.
+            No action is needed from you.
+        </p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 <div class="row g-4">
 
     <!-- ═══ LEFT COLUMN: Details ══════════════════════════════════ -->
@@ -74,7 +172,7 @@
                         <span class="section-label">Property / Department</span>
                         <div class="fw-semibold">{{ record.property_dept or '—' }}</div>
                         {% if record.property_code %}
-                        <div class="text-muted">Code: {{ record.property_code }}</div>
+                        <div class="text-muted">Entity ID: {{ record.property_code }}</div>
                         {% endif %}
                     </div>
                     <div class="col-sm-6 col-md-4">
@@ -204,6 +302,13 @@
                     {% endif %}
 
                     <!-- AVS Score + Validation Evidence -->
+                    {% if record.recipient_mode == 'bulk' %}
+                    <div class="col-12 mt-2" id="bulk-avs-not-applicable">
+                        <div class="card bg-light border-0 p-2 text-muted">
+                            AVS and previously-used verification: Not applicable &mdash; every recipient is a maintained internal bank account verified against the attached listing.
+                        </div>
+                    </div>
+                    {% else %}
                     <div class="col-12 mt-2">
                         <div class="card bg-light border-0 p-2">
                             <div class="row g-2 align-items-center">
@@ -263,6 +368,7 @@
                             </div>
                         </div>
                     </div>
+                    {% endif %}{# not bulk #}
                 </div>
             </div>
         </div>
@@ -339,11 +445,68 @@
                         <div>
                             {% if record.recipient_mode == 'internal' %}
                             <span class="badge bg-info text-dark" id="recipient-type-badge">Internal Company Account</span>
+                            {% elif record.recipient_mode == 'bulk' %}
+                            <span class="badge bg-primary" id="recipient-type-badge">Bulk Recipients &mdash; Attached Listing</span>
+                            {% elif record.recipient_mode == 'unavailable' %}
+                            <span class="badge bg-warning text-dark" id="recipient-type-badge">Recipient details unavailable</span>
                             {% else %}
                             <span class="badge bg-secondary" id="recipient-type-badge">External Payee</span>
                             {% endif %}
                         </div>
                     </div>
+                    {% if record.recipient_mode == 'bulk' %}
+                    {# Bulk recipients: only counts, outcome and the listing link — never an account or routing number. #}
+                    {% set attachments = record.get('attachments', {}) %}
+                    {% set attachment_urls = record.get('attachment_urls', {}) %}
+                    {% set bulk_ok = record.bulk_recipient_rows and record.bulk_recipient_rows == record.bulk_matched_rows %}
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Listing Rows</span>
+                        <div class="fw-semibold" id="bulk-row-count">{{ record.bulk_recipient_rows }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Matched to Maintained Accounts</span>
+                        <div class="fw-semibold" id="bulk-matched-count">{{ record.bulk_matched_rows }}</div>
+                    </div>
+                    <div class="col-sm-6 col-md-4">
+                        <span class="section-label">Validation Outcome</span>
+                        <div id="bulk-validation-outcome">
+                            {% if bulk_ok %}
+                            <span class="badge bg-success">All rows matched</span>
+                            {% elif record.status == 'Draft' %}
+                            <span class="badge bg-warning text-dark">Not yet verified</span>
+                            {% else %}
+                            <span class="badge bg-danger">Not verified</span>
+                            {% endif %}
+                            {% if record.bulk_validated_at %}<div class="text-muted small">{{ record.bulk_validated_at }}</div>{% endif %}
+                        </div>
+                    </div>
+                    <div class="col-12">
+                        <div class="card bg-light border-0 p-2">
+                            <span class="section-label">Recipient Account Listing</span>
+                            <div class="mt-1">
+                                {% if attachments.get('bulk_recipient_listing') %}
+                                <i class="fas fa-paperclip text-success me-1"></i>
+                                {% if attachment_urls.get('bulk_recipient_listing') %}
+                                <a href="{{ attachment_urls.bulk_recipient_listing }}" target="_blank" rel="noopener" class="text-success fw-semibold small">{{ attachments.bulk_recipient_listing }}</a>
+                                {% else %}
+                                <span class="text-success fw-semibold small">{{ attachments.bulk_recipient_listing }}</span>
+                                {% endif %}
+                                {% else %}
+                                <span class="badge bg-danger">Missing</span>
+                                {% endif %}
+                            </div>
+                            <div class="text-muted small mt-1">External ACH/Wire Instructions: replaced by this listing. Account numbers are never shown on this page.</div>
+                        </div>
+                    </div>
+                    {% elif record.recipient_mode == 'unavailable' %}
+                    <div class="col-12" id="recipient-details-unavailable">
+                        <div class="alert alert-warning py-2 px-3 mb-0 small">
+                            This transaction has no single beneficiary on file and its recipient type cannot be read
+                            (the bulk-recipient database structures are not available to this application).
+                            No beneficiary details are shown. Approval and Treasury actions are unaffected.
+                        </div>
+                    </div>
+                    {% else %}
                     {% if record.recipient_mode == 'internal' and record.recipient_entity_name %}
                     <div class="col-sm-6 col-md-4">
                         <span class="section-label">Recipient Entity / Property</span>
@@ -439,6 +602,7 @@
                             </div>
                         </div>
                     </div>
+                    {% endif %}{# bulk / single recipient #}
                 </div>
             </div>
         </div>
@@ -639,11 +803,10 @@
                         {% elif current_roles | any_of('submitter') and record.status in (workflow.STATUS_PENDING_APPROVER,
                               workflow.STATUS_PENDING_CONTROLLER, workflow.STATUS_PENDING_VP,
                               workflow.STATUS_PENDING_CFO, workflow.STATUS_MORE_INFO) %}
-                            {% if record.status == workflow.STATUS_MORE_INFO %}
-                            <button type="button" class="btn btn-primary btn-sm"
-                                    data-bs-toggle="modal" data-bs-target="#resubmitModal">
-                                <i class="fas fa-reply me-1"></i>Resubmit with Additional Info
-                            </button>
+                            {% if record.status == workflow.STATUS_MORE_INFO and record.can_respond_rfi %}
+                            <a href="#additional-information-requested" class="btn btn-warning btn-sm text-dark" id="go-to-rfi-response">
+                                <i class="fas fa-reply me-1"></i>Respond to Information Request
+                            </a>
                             {% endif %}
                             <button type="button" class="btn btn-outline-danger btn-sm"
                                     data-bs-toggle="modal" data-bs-target="#cancelModal">
@@ -897,6 +1060,14 @@
                     <p class="text-muted small mb-3">No additional files attached yet.</p>
                     {% endif %}
 
+                    {% if record.can_respond_rfi %}
+                    <div class="alert alert-warning small py-2" id="upload-not-a-response-note">
+                        <i class="fas fa-exclamation-triangle me-1"></i>
+                        Uploading here stores files on the transaction but <strong>does not send your response</strong>.
+                        Use <a href="#additional-information-requested" class="alert-link">Submit Additional Information</a> to return it for review.
+                    </div>
+                    {% endif %}
+
                     <form method="POST"
                           action="{{ url_for('request_attach', request_id=record.request_id) }}"
                           enctype="multipart/form-data">
@@ -988,56 +1159,6 @@
                     </button>
                     <button type="submit" class="btn btn-warning text-dark btn-sm" id="rfi-submit-btn">
                         <i class="fas fa-paper-plane me-1"></i>Submit Request
-                    </button>
-                </div>
-            </form>
-        </div>
-    </div>
-</div>
-{% endif %}
-
-{% if current_roles | any_of('submitter') and record.status == workflow.STATUS_MORE_INFO %}
-<!-- ── Resubmit with Additional Info Modal ─────────── -->
-<div class="modal fade" id="resubmitModal" tabindex="-1" aria-labelledby="resubmitModalLabel" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <form id="resubmit-form" method="POST"
-                  action="{{ url_for('request_action', request_id=record.request_id) }}"
-                  enctype="multipart/form-data" novalidate>
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-                <input type="hidden" name="action" value="requester_respond">
-                <div class="modal-header bg-primary">
-                    <h5 class="modal-title fw-bold text-white" id="resubmitModalLabel">
-                        <i class="fas fa-reply me-2"></i>Resubmit with Additional Info
-                    </h5>
-                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-                    <div class="row g-3 mb-3 small">
-                        <div class="col-sm-6">
-                            <span class="section-label">Transaction</span>
-                            <div class="fw-semibold">{{ record.request_id }}</div>
-                        </div>
-                    </div>
-                    <label class="form-label fw-semibold" for="resubmit-comment">
-                        Comment <span class="text-muted fw-normal">(required if no file attached)</span>
-                    </label>
-                    <textarea class="form-control mb-3" id="resubmit-comment" name="comment" rows="4"
-                              placeholder="Describe what changed or was corrected..."></textarea>
-                    <label class="form-label fw-semibold" for="resubmit-file">
-                        New Attachment <span class="text-muted fw-normal">(required if no comment)</span>
-                    </label>
-                    <input type="file" class="form-control" id="resubmit-file" name="resubmit_file">
-                    <div id="resubmit-error" class="text-danger small mt-2" style="display:none;">
-                        Add a comment or attach a new file describing what changed.
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-dismiss="modal" id="resubmit-cancel-btn">
-                        Cancel
-                    </button>
-                    <button type="submit" class="btn btn-primary btn-sm" id="resubmit-submit-btn">
-                        <i class="fas fa-paper-plane me-1"></i>Resubmit
                     </button>
                 </div>
             </form>
@@ -1208,48 +1329,59 @@ document.addEventListener('DOMContentLoaded', function () {
     });
 });
 
-// ── Resubmit with Additional Info Modal ───────────────────────────
+// ── Additional Information Requested: inline response form ─────────
 document.addEventListener('DOMContentLoaded', function () {
-    const resubmitModalEl = document.getElementById('resubmitModal');
-    if (!resubmitModalEl) return;
+    const form = document.getElementById('rfi-response-form');
+    if (!form) return;
 
-    const resubmitForm      = document.getElementById('resubmit-form');
-    const resubmitComment   = document.getElementById('resubmit-comment');
-    const resubmitFile      = document.getElementById('resubmit-file');
-    const resubmitError     = document.getElementById('resubmit-error');
-    const resubmitSubmitBtn = document.getElementById('resubmit-submit-btn');
-    const resubmitCancelBtn = document.getElementById('resubmit-cancel-btn');
+    const comment    = document.getElementById('rfi-response-comment');
+    const files      = document.getElementById('rfi-response-files');
+    const fileList   = document.getElementById('rfi-selected-files');
+    const errorEl    = document.getElementById('rfi-response-error');
+    const submitBtn  = document.getElementById('rfi-response-submit');
+    const storedEl   = document.getElementById('rfi-stored-files');
+    const storedCount = storedEl ? parseInt(storedEl.dataset.count || '0', 10) : 0;
+    const submitHtml = submitBtn.innerHTML;
 
-    function setResubmitSubmitting(isSubmitting) {
-        resubmitSubmitBtn.disabled = isSubmitting;
-        resubmitCancelBtn.disabled = isSubmitting;
-        resubmitSubmitBtn.innerHTML = isSubmitting
-            ? '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Submitting...'
-            : '<i class="fas fa-paper-plane me-1"></i>Resubmit';
+    function setSubmitting(isSubmitting) {
+        submitBtn.disabled = isSubmitting;
+        submitBtn.innerHTML = isSubmitting
+            ? '<span class="spinner-border spinner-border-sm me-1" role="status" aria-hidden="true"></span>Submitting response...'
+            : submitHtml;
     }
 
-    resubmitModalEl.addEventListener('shown.bs.modal', function () {
-        resubmitComment.focus();
+    // Choosing files only lists them: nothing is sent until the response is submitted.
+    files.addEventListener('change', function () {
+        fileList.textContent = '';
+        Array.from(files.files).forEach(function (f) {
+            const li = document.createElement('li');
+            li.textContent = f.name + ' \u2014 selected, not yet submitted';
+            fileList.appendChild(li);
+        });
+        errorEl.style.display = 'none';
     });
 
-    resubmitModalEl.addEventListener('hidden.bs.modal', function () {
-        resubmitForm.reset();
-        resubmitError.style.display = 'none';
-        setResubmitSubmitting(false);
-    });
-
-    resubmitForm.addEventListener('submit', function (e) {
-        const hasComment = resubmitComment.value.trim().length > 0;
-        const hasFile    = resubmitFile.files && resubmitFile.files.length > 0;
-        if (!hasComment && !hasFile) {
+    form.addEventListener('submit', function (e) {
+        const hasText  = comment.value.trim().length > 0;
+        const hasFiles = files.files && files.files.length > 0;
+        if (!hasText && !hasFiles && storedCount === 0) {
             e.preventDefault();
-            resubmitError.style.display = 'block';
-            resubmitComment.focus();
+            errorEl.style.display = 'block';
+            comment.classList.add('is-invalid');
+            comment.focus();
             return;
         }
-        resubmitError.style.display = 'none';
-        setResubmitSubmitting(true);
+        if (submitBtn.disabled) {          // a repeated click while the first submission is in flight
+            e.preventDefault();
+            return;
+        }
+        errorEl.style.display = 'none';
+        comment.classList.remove('is-invalid');
+        setSubmitting(true);
     });
+
+    // Coming back to this page (Back button) must not leave the button stuck in its submitting state.
+    window.addEventListener('pageshow', function () { setSubmitting(false); });
 });
 
 // ── Cancel Transaction Modal ─────────────────────────────────────

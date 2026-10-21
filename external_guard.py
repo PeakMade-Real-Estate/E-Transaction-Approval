@@ -167,6 +167,14 @@ import db  # noqa: E402  (after the environment is forced)
 
 db.get_connection = lambda *args, **kwargs: _EmptyConnection()
 
+# Corporate requests are always routed to the one CA-team Controller; the empty fake DB has none, so tests get a
+# deterministic one (User_Key 3, the controller_key the intake test forms already use). Tests override this as needed.
+REAL_GET_ELIGIBLE_CONTROLLERS = db.get_eligible_controllers
+REAL_GET_REQUESTER_CONTROLLER_CONTEXT = db.get_requester_controller_context
+db.get_eligible_controllers = lambda team: [{"user_key": 3, "display_name": "Test Corporate Controller"}]
+# By default the requester is an ordinary submitter, not a Controller; Controller-requester tests override this.
+db.get_requester_controller_context = lambda user_key: {"is_controller": False, "team": None}
+
 import pyodbc  # noqa: E402
 
 pyodbc.connect = lambda *args, **kwargs: _block("pyodbc.connect (real SQL connection)")

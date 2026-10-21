@@ -26,3 +26,6 @@ Thumbs.db
 
 # Ad-hoc debug/schema-check scripts (never meant to be committed)
 _tmp_*.py
+
+# Real Treasury sample documents (sensitive banking data) - reference only, never commit
+Bulk Recipient Documents/

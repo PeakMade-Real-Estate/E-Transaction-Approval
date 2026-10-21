@@ -103,8 +103,8 @@
                                        id="treasury_service_date" name="treasury_service_date" required>
                             </div>
 
-                            <!-- Previously Used Instructions -->
-                            <div class="col-md-6">
+                            <!-- Previously Used Instructions (not applicable to a bulk-recipient request) -->
+                            <div class="col-md-6 bulk-hide">
                                 <label class="form-label fw-semibold d-block">Banking Instructions Previously Used?</label>
                                 <div class="form-check mt-1">
                                     <input class="form-check-input" type="checkbox"
@@ -245,12 +245,30 @@
                                 <input type="text" class="form-control" id="property_dept"
                                        name="property_dept" value="{{ draft.property_dept if draft and draft.classification == 'corporate' else request.form.get('property_dept', '') }}"
                                        placeholder="e.g. Treasury / Corporate Finance">
+                                <div class="form-text" id="dept-from-entity-note" style="display:none;">Filled from the selected Entity ID.</div>
                             </div>
-                            <div class="col-md-4" id="corporate-entityid-wrapper" style="display:none;">
-                                <label class="form-label fw-semibold" for="entity_id">Entity ID</label>
-                                <input type="text" class="form-control" id="entity_id"
-                                       value="{{ draft.property_code if draft and draft.classification == 'corporate' else request.form.get('entity_id', '') }}"
-                                       name="entity_id" placeholder="e.g. SRA-001">
+                            {% set entity_opts = get_entity_options() %}
+                            {% set entity_state = entity_form_state(draft if draft else none, entity_opts) %}
+                            <div class="col-md-8" id="corporate-entityid-wrapper" style="display:none;">
+                                <label class="form-label fw-semibold" for="entity_choice">Entity ID</label>
+                                <input type="search" class="form-control form-control-sm mb-1" id="entity_search"
+                                       placeholder="Search by Entity ID or name" aria-label="Search Entity ID" autocomplete="off">
+                                <select class="form-select" id="entity_choice" name="entity_choice">
+                                    <option value="">&#8212; Select Entity ID &#8212;</option>
+                                    {% for e in entity_opts %}
+                                    <option value="{{ e.entity_id }}" data-name="{{ e.name }}" data-search="{{ (e.entity_id ~ ' ' ~ e.name)|lower }}"
+                                        {% if entity_state.choice == e.entity_id %}selected{% endif %}>{{ e.label }}</option>
+                                    {% endfor %}
+                                    <option value="{{ ENTITY_CHOICE_MANUAL }}" {% if entity_state.choice == ENTITY_CHOICE_MANUAL %}selected{% endif %}>{{ ENTITY_MANUAL_LABEL }}</option>
+                                </select>
+                                <input type="text" class="form-control mt-2" id="entity_id" name="entity_id"
+                                       maxlength="100" placeholder="Enter Entity ID" aria-label="Entity ID (manual entry)"
+                                       value="{{ entity_state.manual }}" style="display:none;">
+                                {% if not entity_opts %}
+                                <div class="form-text text-warning">
+                                    The Entity ID list is not available right now &#8212; choose &ldquo;{{ ENTITY_MANUAL_LABEL }}&rdquo; to type one.
+                                </div>
+                                {% endif %}
                             </div>
 
                             <!-- Approver -->
@@ -258,6 +276,7 @@
                                 <label class="form-label fw-semibold" for="approver">
                                     Approver <span class="text-danger">*</span>
                                 </label>
+                                <div id="approver-picker">
                                 {% if approver_users %}
                                 <select class="form-select" id="approver" name="approver_key" required>
                                     <option value="">&#8212; Select Approver &#8212;</option>
@@ -270,6 +289,12 @@
                                 <input type="text" class="form-control" id="approver"
                                        name="approver" placeholder="Approver's full name" required>
                                 {% endif %}
+                                </div>
+                                <div id="approver-auto" style="display:none;">
+                                    <input type="text" class="form-control" id="approver_auto_name" readonly aria-label="Approver (assigned automatically)">
+                                    <div class="form-text" id="approver_auto_note"></div>
+                                    <div class="alert alert-warning small mt-1 mb-0" id="approver_auto_error" style="display:none;"></div>
+                                </div>
                             </div>
 
                             <!-- Controller -->
@@ -277,6 +302,7 @@
                                 <label class="form-label fw-semibold" for="controller">
                                     Controller <span class="text-danger">*</span>
                                 </label>
+                                <div id="controller-picker">
                                 {% if controller_users %}
                                 <select class="form-select" id="controller" name="controller_key" required>
                                     <option value="">&#8212; Select Controller &#8212;</option>
@@ -289,6 +315,12 @@
                                 <input type="text" class="form-control" id="controller"
                                        name="controller" placeholder="Controller's full name" required>
                                 {% endif %}
+                                </div>
+                                <div id="controller-auto" style="display:none;">
+                                    <input type="text" class="form-control" id="controller_auto_name" readonly aria-label="Controller (assigned automatically)">
+                                    <div class="form-text" id="controller_auto_note"></div>
+                                    <div class="alert alert-warning small mt-1 mb-0" id="controller_auto_error" style="display:none;"></div>
+                                </div>
                             </div>
 
                         </div><!-- /row -->
@@ -357,8 +389,8 @@
                                        name="verbal_confirm_datetime">
                             </div>
 
-                            <!-- AVS Score + Validation Evidence -->
-                            <div class="col-md-4">
+                            <!-- AVS Score + Validation Evidence (not applicable to a bulk-recipient request) -->
+                            <div class="col-md-4 bulk-hide">
                                 <label class="form-label fw-semibold" for="avs_score">
                                     AVS Score <span class="text-muted fw-normal small">(0–100)</span>
                                 </label>
@@ -370,7 +402,7 @@
                                 <div class="form-text">Leave blank if score is unavailable.</div>
                             </div>
 
-                            <div class="col-md-8">
+                            <div class="col-md-8 bulk-hide">
                                 <label class="form-label fw-semibold" for="file_validation_evidence">
                                     Validation Evidence <span class="text-danger">*</span>
                                     <span class="text-muted fw-normal small ms-1">WF AVS screenshot or alternative verification</span>
@@ -386,7 +418,7 @@
                             </div>
 
                             <!-- Low / No-Score Warning -->
-                            <div class="col-12" id="avs-low-score-warning" style="display:none;">
+                            <div class="col-12 bulk-hide" id="avs-low-score-warning" style="display:none;">
                                 <div class="alert alert-warning small py-2 mb-0">
                                     <i class="fas fa-exclamation-triangle me-1"></i>
                                     <strong>Score below 90 or unavailable</strong> — alternative verification
@@ -396,7 +428,7 @@
                             </div>
 
                             <!-- Additional verification checkboxes -->
-                            <div class="col-12">
+                            <div class="col-12 bulk-hide">
                                 <div class="card bg-light border-0 p-3">
                                     <div class="form-check mb-2">
                                         <input class="form-check-input" type="checkbox"
@@ -531,7 +563,7 @@
                     <div class="accordion-body pt-3">
                         {% set recipient_mode_val = (draft.recipient_mode if draft else (request.form.get('recipient_mode') or 'external')) %}
                         {% set recipient_key_val = (draft.recipient_bank_account_key if draft else request.form.get('recipient_bank_account_key', '')) %}
-                        {% set ext_numbers_required = (not draft) or (draft.recipient_mode == 'internal') %}
+                        {% set ext_numbers_required = (not draft) or (draft.recipient_mode in ('internal', 'bulk')) %}
                         <div class="row g-3">
                             {% if bank_accounts %}
                             {# Recipient type. External is the default and unchanged. Internal selects a
@@ -543,7 +575,7 @@
                                 <label class="form-label fw-semibold d-block">Recipient Type <span class="text-danger">*</span></label>
                                 <div class="form-check form-check-inline">
                                     <input class="form-check-input" type="radio" name="recipient_mode" id="recipient_mode_external"
-                                           value="external" {% if recipient_mode_val != 'internal' %}checked{% endif %}>
+                                           value="external" {% if recipient_mode_val not in ('internal', 'bulk') %}checked{% endif %}>
                                     <label class="form-check-label" for="recipient_mode_external">External payee</label>
                                 </div>
                                 <div class="form-check form-check-inline">
@@ -551,10 +583,17 @@
                                            value="internal" {% if recipient_mode_val == 'internal' %}checked{% endif %}>
                                     <label class="form-check-label" for="recipient_mode_internal">Internal company bank account</label>
                                 </div>
+                                {% if bulk_recipient_enabled %}
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="radio" name="recipient_mode" id="recipient_mode_bulk"
+                                           value="bulk" {% if recipient_mode_val == 'bulk' %}checked{% endif %}>
+                                    <label class="form-check-label" for="recipient_mode_bulk">Bulk recipients &mdash; attached listing (Corporate only)</label>
+                                </div>
+                                {% endif %}
                                 <div id="recipient-mode-note" class="form-text text-warning fw-semibold" style="display:none;"></div>
                             </div>
                             {% endif %}
-                            <div class="col-md-6">
+                            <div class="col-md-6 bulk-hide" id="payee-name-col">
                                 <label class="form-label fw-semibold" for="recv_payee_name">
                                     Recipient / Payee Name <span class="text-danger">*</span>
                                 </label>
@@ -600,6 +639,38 @@
                                     The system fills in this account's banking details securely when you save or submit.
                                     Full account and routing numbers are never displayed here.
                                 </div>
+                            </div>
+                            {% endif %}
+                            {% if bulk_recipient_enabled %}
+                            {# Bulk recipients (Corporate ACH / Same Day ACH / Wire). The listing's account numbers never
+                               reach this page: the server verifies every row against the maintained BankAccounts and only
+                               row numbers and counts are shown. #}
+                            <div class="col-12" id="bulk-recipient-panel" style="display:none;">
+                                <div class="alert alert-info small py-2 mb-2">
+                                    <i class="fas fa-list me-1"></i>
+                                    Attach an Excel (.xlsx) listing of the recipient accounts for this payment. Row 1 must contain the headers
+                                    <strong>Account Number</strong> and <strong>Routing Number</strong>, and both columns must be formatted as
+                                    <strong>Text</strong>. The file must be an unprotected .xlsx (not password-protected or encrypted by a
+                                    sensitivity label). Every row must match exactly one maintained, Open bank account; if any row does not,
+                                    the whole request is blocked. The listing replaces the External ACH/Wire Instructions, and AVS /
+                                    previous-use checks do not apply. Approvals and thresholds are unchanged.
+                                    <a href="{{ url_for('static', filename='templates/Bulk_Recipient_Listing_Template.xlsx') }}" download>Download the listing template</a>.
+                                </div>
+                                <label class="form-label fw-semibold" for="file_bulk_recipient_listing">
+                                    Recipient Account Listing <span class="text-danger">*</span>
+                                </label>
+                                <input type="file" class="form-control" id="file_bulk_recipient_listing"
+                                       name="file_bulk_recipient_listing"
+                                       {% if existing_attachments and existing_attachments.bulk_recipient_listing %}data-existing="true"{% endif %}
+                                       accept=".xlsx">
+                                {{ existing_attachment_note(existing_attachments.bulk_recipient_listing if existing_attachments else None) }}
+                                {% if draft and draft.recipient_mode == 'bulk' and draft.bulk_recipient_rows %}
+                                <div class="form-text" id="bulk-draft-state">
+                                    Saved listing: {{ draft.bulk_recipient_rows }} recipient row(s), {{ draft.bulk_matched_rows }} verified.
+                                    It is verified again when you submit.
+                                </div>
+                                {% endif %}
+                                <div id="bulk-listing-result" class="mt-2" aria-live="polite"></div>
                             </div>
                             {% endif %}
                             <div class="col-12" id="external-recipient-fields">
@@ -650,17 +721,17 @@
                             </div>
                               </div>
                             </div><!-- /external-recipient-fields -->
-                            <div class="col-md-4">
+                            <div class="col-md-4 bulk-hide">
                                 <label class="form-label" for="recv_contact_name">Recipient Contact Name</label>
                                 <input type="text" class="form-control" id="recv_contact_name" value="{{ draft.recv_contact_name if draft else request.form.get('recv_contact_name', '') }}"
                                        name="recv_contact_name" placeholder="Contact name">
                             </div>
-                            <div class="col-md-4">
+                            <div class="col-md-4 bulk-hide">
                                 <label class="form-label" for="recv_contact_email">Recipient Contact Email</label>
                                 <input type="email" class="form-control" id="recv_contact_email" value="{{ draft.recv_contact_email if draft else request.form.get('recv_contact_email', '') }}"
                                        name="recv_contact_email" placeholder="email@example.com">
                             </div>
-                            <div class="col-md-4">
+                            <div class="col-md-4 bulk-hide">
                                 <label class="form-label" for="recv_contact_phone">Recipient Contact Phone</label>
                                 <input type="tel" class="form-control" id="recv_contact_phone" value="{{ draft.recv_contact_phone if draft else request.form.get('recv_contact_phone', '') }}"
                                        name="recv_contact_phone" placeholder="(555) 000-0000">
@@ -671,8 +742,8 @@
                                           rows="2" placeholder="Additional notes for receiving bank...">{{ request.form.get('notes_recv', '') }}</textarea>
                             </div>
 
-                            <!-- External ACH/Wire Instructions Upload -->
-                            <div class="col-12">
+                            <!-- External ACH/Wire Instructions Upload (replaced by the recipient listing in bulk mode) -->
+                            <div class="col-12 bulk-hide">
                                 <label class="form-label fw-semibold" for="file_wire_ach_instructions">
                                     External ACH/Wire Instructions <span id="wire-instructions-required-star" class="text-danger">*</span>
                                 </label>
@@ -1004,9 +1075,80 @@
             if (select.selectedOptions[0] && select.selectedOptions[0].hidden) select.value = '';
         });
 
+        // Server-assigned Approver/Controller (a Controller requester's team VP; the Corporate Controller) replace the
+        // picker with a locked value. Display only: the server re-applies the same rule on every submit.
+        const assignmentUi = {{ assignment_ui()|tojson }};
+        const classificationKey = corporateChecked ? 'corporate' : (propertyChecked ? 'property' : '');
+        const assignments = (assignmentUi.by_class || {})[classificationKey] || {};
+        ['approver', 'controller'].forEach(field => {
+            const auto = document.getElementById(field + '-auto');
+            const picker = document.getElementById(field + '-picker');
+            if (!auto || !picker) return;
+            const assigned = assignments[field] || null;
+            auto.style.display = assigned ? 'block' : 'none';
+            picker.style.display = assigned ? 'none' : 'block';
+            const pickerField = document.getElementById(field);
+            if (pickerField) pickerField.required = !assigned;
+            if (!assigned) return;
+            document.getElementById(field + '_auto_name').value = assigned.name || '';
+            document.getElementById(field + '_auto_name').style.display = assigned.name ? 'block' : 'none';
+            document.getElementById(field + '_auto_note').textContent = assigned.note || '';
+            const errorBox = document.getElementById(field + '_auto_error');
+            errorBox.textContent = assigned.error || '';
+            errorBox.style.display = assigned.error ? 'block' : 'none';
+        });
+
+        if (typeof syncEntityChoice === 'function') syncEntityChoice();
+
         if (typeof onAmountChange === 'function') onAmountChange();  // base tier label depends on classification too
     }
     document.querySelectorAll('input[name="classification"]').forEach(el => el.addEventListener('change', onClassificationChange));
+
+    // ── Entity ID: searchable list + manual fallback ────────────
+    // Only the canonical Entity ID is the option value; the server re-validates it against SQL.
+    function filterEntityOptions() {
+        const select = document.getElementById('entity_choice');
+        const query  = (document.getElementById('entity_search')?.value || '').trim().toLowerCase();
+        if (!select) return;
+        Array.from(select.options).forEach(opt => {
+            if (!opt.dataset.search) return;  // placeholder and manual option always stay available
+            opt.hidden = !!query && !opt.dataset.search.includes(query) && !opt.selected;
+        });
+    }
+    function syncEntityChoice() {
+        const select  = document.getElementById('entity_choice');
+        const manual  = document.getElementById('entity_id');
+        if (!select || !manual) return;
+        const corporate = !!document.getElementById('classification_corporate')?.checked;
+        const isManual  = select.value === '{{ ENTITY_CHOICE_MANUAL }}';
+        manual.style.display = isManual ? 'block' : 'none';
+        manual.required = corporate && isManual;
+
+        // A listed entity supplies the Department (the server re-derives it from SQL); manual/none leaves it editable.
+        const dept = document.getElementById('property_dept');
+        const note = document.getElementById('dept-from-entity-note');
+        if (!dept) return;
+        const chosen = select.selectedOptions[0];
+        const listedName = (corporate && chosen && chosen.dataset.name) ? chosen.dataset.name : '';
+        if (listedName) {
+            dept.value = listedName;
+            dept.readOnly = true;
+            dept.dataset.autofilled = '1';
+        } else {
+            if (dept.dataset.autofilled === '1') { dept.value = ''; dept.dataset.autofilled = ''; }
+            dept.readOnly = false;
+        }
+        if (note) note.style.display = listedName ? 'block' : 'none';
+    }
+    document.getElementById('entity_search')?.addEventListener('input', filterEntityOptions);
+    document.getElementById('entity_search')?.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter') return;
+        e.preventDefault();  // never submit the form from the search box
+        const select = document.getElementById('entity_choice');
+        const first = Array.from(select.options).find(o => o.dataset.search && !o.hidden);
+        if (first) { select.value = first.value; syncEntityChoice(); }
+    });
+    document.getElementById('entity_choice')?.addEventListener('change', syncEntityChoice);
     onClassificationChange();  // reflect a resumed Draft's stored classification on load
 
     // ── Urgent → show/hide Urgency Reason ───────────────────────
@@ -1128,7 +1270,7 @@
 
     async function checkPriorUseMatch() {
         const cb = document.getElementById('instructions_previously_used');
-        if (!cb || !cb.checked) { renderPriorUseMatchPanel('hidden'); return; }
+        if (!cb || !cb.checked || currentRecipientMode() === 'bulk') { renderPriorUseMatchPanel('hidden'); return; }
         const payee  = (document.getElementById('recv_payee_name')?.value || '').trim();
         const bank   = (document.getElementById('recv_bank_name')?.value || '').trim();
         const acct   = (document.getElementById('recv_account_number')?.value || '').trim();
@@ -1215,45 +1357,80 @@
     // (recipient_bank_account_key) and the confirmed payee name are sent.
     // This is UX only: the server re-validates everything.
     const INTERNAL_RECIPIENT_TYPES = ['ACH', 'Intra Bank Transfer'];
+    // Bulk recipients (Corporate only): ACH, Same Day ACH and Wire. UX only — the server enforces it.
+    const BULK_RECIPIENT_TYPES = ['ACH', 'Same Day ACH', 'Wire'];
 
     function currentRecipientMode() {
+        if (document.getElementById('recipient_mode_bulk')?.checked) return 'bulk';
         return document.getElementById('recipient_mode_internal')?.checked ? 'internal' : 'external';
     }
 
     function applyRecipientMode() {
         const internalRadio = document.getElementById('recipient_mode_internal');
         const externalRadio = document.getElementById('recipient_mode_external');
+        const bulkRadio = document.getElementById('recipient_mode_bulk');  // only rendered when the feature is enabled
         if (!internalRadio || !externalRadio) return;  // internal picker unavailable (no bank accounts loaded)
         const reqType = document.getElementById('request_type')?.value || '';
         const note = document.getElementById('recipient-mode-note');
         const typeAllowed = !reqType || INTERNAL_RECIPIENT_TYPES.includes(reqType);
+        let noteText = '';
 
         if (!typeAllowed && internalRadio.checked) {
             externalRadio.checked = true;
             if (typeof clearRecipientSelection === 'function') clearRecipientSelection();
-            if (note) {
-                note.textContent = reqType === SAME_DAY_ACH_TYPE
-                    ? 'Same Day ACH requires an external payee; switched back to External payee.'
-                    : 'An internal company account can only be the recipient of an ACH or Intra Bank Transfer request; switched back to External payee.';
-                note.style.display = 'block';
-            }
-        } else if (note && typeAllowed) {
-            note.style.display = 'none';
+            noteText = reqType === SAME_DAY_ACH_TYPE
+                ? 'Same Day ACH requires an external payee; switched back to External payee.'
+                : 'An internal company account can only be the recipient of an ACH or Intra Bank Transfer request; switched back to External payee.';
         }
         internalRadio.disabled = !typeAllowed;
 
-        const internal = internalRadio.checked;
+        if (bulkRadio) {
+            const corporate = !!document.getElementById('classification_corporate')?.checked;
+            const bulkTypeAllowed = !reqType || BULK_RECIPIENT_TYPES.includes(reqType);
+            const bulkAllowed = corporate && bulkTypeAllowed;
+            if (bulkRadio.checked && !bulkAllowed) {
+                externalRadio.checked = true;
+                noteText = !corporate
+                    ? 'Bulk recipient payments are available for Corporate requests only; switched back to External payee.'
+                    : 'Bulk recipient payments are available for ACH, Same Day ACH and Wire requests only; switched back to External payee.';
+            }
+            bulkRadio.disabled = !bulkAllowed;
+        }
+        if (note) {
+            if (noteText) { note.textContent = noteText; note.style.display = 'block'; }
+            else if (typeAllowed) note.style.display = 'none';
+        }
+
+        const mode = currentRecipientMode();
+        const internal = mode === 'internal';
+        const bulk = mode === 'bulk';
         const panel = document.getElementById('internal-recipient-panel');
         const ext = document.getElementById('external-recipient-fields');
         const payeeNote = document.getElementById('internal-payee-note');
         if (panel) panel.style.display = internal ? 'block' : 'none';
         if (payeeNote) payeeNote.style.display = internal ? 'block' : 'none';
         if (ext) {
-            ext.style.display = internal ? 'none' : '';
-            ext.querySelectorAll('input, select, textarea').forEach(el => { el.disabled = internal; });
+            ext.style.display = (internal || bulk) ? 'none' : '';
+            ext.querySelectorAll('input, select, textarea').forEach(el => { el.disabled = internal || bulk; });
         }
         const keyEl = document.getElementById('recipient_bank_account_key');
-        if (keyEl) keyEl.disabled = !internal;  // never submit a recipient key in external mode
+        if (keyEl) keyEl.disabled = !internal;  // never submit a recipient key in external/bulk mode
+
+        // Bulk: the attached listing replaces the single payee, instructions and AVS/prior-use verification.
+        const bulkPanel = document.getElementById('bulk-recipient-panel');
+        if (bulkPanel) bulkPanel.style.display = bulk ? 'block' : 'none';
+        document.querySelectorAll('.bulk-hide').forEach(el => {
+            el.classList.toggle('d-none', bulk);
+            el.querySelectorAll('input, select, textarea').forEach(inp => { inp.disabled = bulk; });
+        });
+        const payeeInput = document.getElementById('recv_payee_name');
+        if (payeeInput) payeeInput.required = !bulk;
+        const listingInput = document.getElementById('file_bulk_recipient_listing');
+        if (listingInput) listingInput.disabled = !bulk;
+        if (bulk) {
+            const prevUsedCb = document.getElementById('instructions_previously_used');
+            if (prevUsedCb && prevUsedCb.checked) { prevUsedCb.checked = false; onInstructionsPreviouslyUsedChange(false); }
+        }
         updateInstructionsRequirement();
     }
 
@@ -1292,6 +1469,9 @@
             errors.push({ msg: '<strong>Property</strong> must be selected.', section: 'sectionA' });
         } else if (corporateChecked && !document.getElementById('property_dept')?.value.trim()) {
             errors.push({ msg: '<strong>Department</strong> is required.', section: 'sectionA' });
+        } else if (corporateChecked && document.getElementById('entity_choice')?.value === '{{ ENTITY_CHOICE_MANUAL }}'
+                   && !document.getElementById('entity_id')?.value.trim()) {
+            errors.push({ msg: '<strong>Entity ID</strong> — enter the Entity ID, or choose one from the list.', section: 'sectionA' });
         }
 
         // Section C — Originating bank account (DB mode only)
@@ -1308,18 +1488,24 @@
                 errors.push({ msg: 'The <strong>recipient account</strong> cannot be the same as the originating account.', section: 'sectionD' });
         }
 
-        // Section B — Validation Evidence
+        // Section B — Validation Evidence (not applicable to a bulk-recipient request)
+        const isBulk = currentRecipientMode() === 'bulk';
         const valEv = document.getElementById('file_validation_evidence');
-        if (valEv && !valEv.files.length && !valEv.dataset.existing)
+        if (!isBulk && valEv && !valEv.files.length && !valEv.dataset.existing)
             errors.push({ msg: '<strong>Validation Evidence</strong> — attach the WF AVS screenshot or alternative verification.', section: 'sectionB' });
+
+        // Section D — Bulk recipient listing (replaces the External ACH/Wire Instructions)
+        const bulkListing = document.getElementById('file_bulk_recipient_listing');
+        if (isBulk && bulkListing && !bulkListing.files.length && !bulkListing.dataset.existing)
+            errors.push({ msg: '<strong>Recipient Account Listing</strong> (.xlsx) must be attached.', section: 'sectionD' });
 
         // Section D — External ACH/Wire Instructions
         const wireInstr = document.getElementById('file_wire_ach_instructions');
-        if (wireInstr && !wireInstr.files.length && !wireInstr.dataset.existing && !updateInstructionsRequirement())
+        if (!isBulk && wireInstr && !wireInstr.files.length && !wireInstr.dataset.existing && !updateInstructionsRequirement())
             errors.push({ msg: '<strong>External ACH/Wire Instructions</strong> must be attached.', section: 'sectionD' });
 
         // Section D — Beneficiary address required for Wire
-        if (reqType === 'Wire') {
+        if (reqType === 'Wire' && !isBulk) {
             const addr = document.getElementById('recv_bank_address');
             if (addr && !addr.value.trim())
                 errors.push({ msg: '<strong>Receiving Bank / Beneficiary Address</strong> is required for Wire transactions.', section: 'sectionD' });
@@ -1391,6 +1577,7 @@
             file_validation_evidence:   'has_validation_evidence',
             file_wire_ach_instructions: 'has_wire_ach_instructions',
             file_payment_support:       'has_payment_support',
+            file_bulk_recipient_listing: 'has_bulk_recipient_listing',
         };
         for (const [fileFieldName, flagName] of Object.entries(fileFlags)) {
             const input = document.getElementById(fileFieldName);
@@ -1413,6 +1600,66 @@
             throw new Error((data && data.reason) || 'Precheck returned an unexpected response');
         }
         return data.errors.map(msg => ({ msg, section: null }));
+    }
+
+    // ── Bulk recipient listing: verify the selected .xlsx server-side (read-only) ──
+    // The file is sent to the check endpoint only; the response holds counts, row numbers and fixed
+    // messages — never an account or routing number. /intake/submit re-verifies the file itself.
+    function renderBulkListingResult(data, errorText) {
+        const box = document.getElementById('bulk-listing-result');
+        if (!box) return;
+        box.textContent = '';
+        const alert = document.createElement('div');
+        if (errorText) {
+            alert.className = 'alert alert-warning small py-2 mb-0';
+            alert.textContent = errorText;
+        } else if (data.ok) {
+            alert.className = 'alert alert-success small py-2 mb-0';
+            alert.textContent = 'Listing verified: ' + data.matched_count + ' of ' + data.row_count +
+                ' recipient rows match a maintained, Open bank account.';
+        } else {
+            alert.className = 'alert alert-danger small py-2 mb-0';
+            const head = document.createElement('strong');
+            head.textContent = 'The listing cannot be used. The whole request is blocked until every row verifies:';
+            const list = document.createElement('ul');
+            list.className = 'mb-0 mt-1';
+            data.errors.forEach(msg => { const li = document.createElement('li'); li.textContent = msg; list.appendChild(li); });
+            alert.appendChild(head);
+            alert.appendChild(list);
+        }
+        box.appendChild(alert);
+    }
+
+    async function runBulkListingCheck(form) {
+        const input = document.getElementById('file_bulk_recipient_listing');
+        if (!input || !input.files || !input.files.length) return null;
+        const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || '';
+        const body = new FormData();
+        body.append('file_bulk_recipient_listing', input.files[0]);
+        body.append('bank_account_key', document.getElementById('bank_account_key')?.value || '');
+        const resp = await fetch('{{ url_for("intake_bulk_listing_check") }}', {
+            method: 'POST', headers: { 'X-CSRFToken': csrfToken }, body: body,
+            signal: AbortSignal.timeout(60000),
+        });
+        if (!resp.ok) throw new Error('Listing check failed with status ' + resp.status);
+        const data = await resp.json();
+        if (!data || data.success !== true || !Array.isArray(data.errors)) {
+            throw new Error((data && data.reason) || 'Listing check returned an unexpected response');
+        }
+        return data;
+    }
+
+    async function onBulkListingChosen() {
+        const input = document.getElementById('file_bulk_recipient_listing');
+        const box = document.getElementById('bulk-listing-result');
+        if (!input || !box) return;
+        if (!input.files.length) { box.textContent = ''; return; }
+        box.textContent = 'Verifying listing…';
+        try {
+            renderBulkListingResult(await runBulkListingCheck(), null);
+        } catch (e) {
+            renderBulkListingResult(null, 'The listing could not be verified right now. It will be verified again when you submit.');
+        }
     }
 
     function setSubmitBusy(form, busy) {
@@ -1449,6 +1696,14 @@
         let precheckPassed = false;
         try {
             const serverErrors = await runServerPrecheck(form);
+            if (!serverErrors.length && currentRecipientMode() === 'bulk') {
+                // Verify a newly selected listing (the precheck above only sees a listing already stored on a Draft).
+                const listing = await runBulkListingCheck(form);
+                if (listing) {
+                    renderBulkListingResult(listing, null);
+                    if (!listing.ok) listing.errors.forEach(msg => serverErrors.push({ msg, section: 'sectionD' }));
+                }
+            }
             if (serverErrors.length) {
                 renderValidationErrors(serverErrors);
             } else {
@@ -1529,9 +1784,13 @@
             applyAutomaticUrgency(true);
         }
 
-        // Recipient type (External default / Internal maintained account)
+        // Recipient type (External default / Internal maintained account / Bulk listing)
         document.querySelectorAll('input[name="recipient_mode"]').forEach(r =>
             r.addEventListener('change', function () { applyRecipientMode(); schedulePriorUseCheck(); }));
+        // Bulk is Corporate-only: changing Property/Corporate re-evaluates eligibility.
+        document.querySelectorAll('input[name="classification"]').forEach(r =>
+            r.addEventListener('change', applyRecipientMode));
+        document.getElementById('file_bulk_recipient_listing')?.addEventListener('change', onBulkListingChosen);
         applyRecipientMode();
 
         // Pre-submit validation

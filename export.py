@@ -26,6 +26,7 @@ EXPORT_COLUMNS = [
     ("Current Status",         "status"),
     ("Current Workflow Stage", "current_workflow_stage"),
     ("Request Type",           "request_type"),
+    ("Recipient Type",         "recipient_mode"),
     ("Prepared By",            "prepared_by"),
     ("Prepared Date",          "prepared_date"),
     ("Submitted Date",         "submitted_date"),
@@ -65,6 +66,9 @@ def _format_value(key, value):
             return "0.00"
     if key == "urgent":
         return "Yes" if value else "No"
+    if key == "recipient_mode":
+        # Only Bulk is labelled; the recipient listing itself is never exported.
+        return "Bulk Recipients" if (value or "").strip().lower() == "bulk" else ""
     return _sanitize_text(value)
 
 

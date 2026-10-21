@@ -77,6 +77,9 @@ DOC_TYPE_PAYMENT_SUPPORT       = "Payment Support"
 DOC_TYPE_APPROVAL_EVIDENCE     = "Approval Evidence"
 DOC_TYPE_RELEASE_CONFIRMATION  = "Release Confirmation"
 DOC_TYPE_OTHER                 = "Other"
+# Corporate bulk-recipient payments. This value MUST be added to the library's strict DocumentType
+# choice column (an administrator step); until then uploads of this category cannot be tagged.
+DOC_TYPE_BULK_RECIPIENT_LISTING = "Bulk Recipient Listing"
 
 # Batch 5: Treasury processing/release evidence — distinct DocumentType values so
 # initiation vs. Corporate release vs. final bank release are never conflated
@@ -92,6 +95,7 @@ DOC_TYPE_TO_ATTACHMENT_KEY = {
     DOC_TYPE_AVS_SCREENSHOT:        "avs_screenshot",
     DOC_TYPE_WIRE_ACH_INSTRUCTIONS: "wire_ach_instructions",
     DOC_TYPE_PAYMENT_SUPPORT:       "payment_support",
+    DOC_TYPE_BULK_RECIPIENT_LISTING: "bulk_recipient_listing",
 }
 
 # Maps the same three Batch 5 evidence DocumentTypes to the request_detail.html
@@ -414,6 +418,24 @@ def list_attachments(request_id):
             "uploaded_date":    item.get("createdDateTime", ""),
         })
     return results
+
+def read_latest_bulk_listing(request_id, max_bytes):
+    """
+    (original_filename, bytes) of the most recently uploaded Bulk Recipient Listing stored for this
+    request, or None if there is none. Reads through the app's own Graph identity (no sharing link is
+    created); raises ValueError if the stored file exceeds max_bytes.
+    """
+    items = [i for i in list_attachments(request_id) if i["doc_type"] == DOC_TYPE_BULK_RECIPIENT_LISTING]
+    if not items:
+        return None
+    latest = max(items, key=lambda i: i.get("uploaded_date") or "")
+    resp = _graph_request(
+        "GET", f"{GRAPH_BASE}/drives/{get_drive_id()}/root:/{request_id}/{latest['filename']}:/content",
+        stream=True, timeout=60)
+    content = resp.raw.read(max_bytes + 1, decode_content=True)
+    if len(content) > max_bytes:
+        raise ValueError("Stored listing is too large.")
+    return latest.get("original_filename") or latest["filename"], content
 
 
 def retag_validation_evidence(request_id, new_doc_type):

@@ -543,8 +543,87 @@ def _route_after_controller(txn: dict, satisfied: list):
 
 
 def _bank_releaser(txn: dict):
-    """CFO must never become the final Property bank releaser — VP if assigned, else Controller."""
+    """
+    CFO must never become the final Property bank releaser. When the transaction required a VP, the VP is the
+    releaser and a missing VP is a configuration error - never a silent fall back to the Controller. When no VP
+    was required the existing behavior is unchanged (VP if one is assigned, else the Controller).
+    """
     vp_key = txn.get("vp_approver_user_key")
+    if txn.get("requires_vp") and not vp_key:
+        raise WorkflowConfigurationError(
+            "This transaction required VP approval but no VP is assigned, so the bank releaser cannot be determined."
+        )
     if vp_key:
         return vp_key
     return txn.get("selected_controller_user_key")
+
+
+# ── Automatic VP / CFO assignment ────────────────────────────
+# The VP is team-specific (AppUser.Team CA for Corporate, PA for Property); the CFO is company-wide. Both are resolved
+# only when the approval about to be recorded would move the transaction into the VP / CFO stage, and only when the
+# transaction does not already carry that assignee. Lookups are injected so this module stays free of database access.
+
+_ROUTING_PROBE_KEY = -1
+
+
+def vp_team_for_classification(entity_classification: str) -> str:
+    """AppUser.Team of the VP responsible for a Corporate/Property transaction; an unknown classification is an error."""
+    classification = (entity_classification or "").strip().lower()
+    if classification == CORPORATE_CLASSIFICATION:
+        return TEAM_CORPORATE
+    if classification == PROPERTY_CLASSIFICATION:
+        return TEAM_PROPERTY
+    raise WorkflowConfigurationError(
+        "The VP responsible for this transaction cannot be determined because it has no Corporate or Property classification."
+    )
+
+
+def _assignee_needed_by_approval(txn: dict):
+    """
+    "vp" / "cfo" when approving `txn` now would move it into that stage while the stage has no assignee yet, else None.
+    Asks determine_next_step() itself (with placeholder assignees) so the routing rules live in one place only.
+    """
+    probe = dict(txn)
+    probe["vp_approver_user_key"] = txn.get("vp_approver_user_key") or _ROUTING_PROBE_KEY
+    probe["cfo_approver_user_key"] = txn.get("cfo_approver_user_key") or _ROUTING_PROBE_KEY
+    try:
+        next_status = determine_next_step(probe, ACTION_APPROVE)[0]
+    except UnauthorizedActionError:
+        return None  # not an approval stage; the real call (after authorization) reports it
+    if next_status == STATUS_PENDING_VP and not txn.get("vp_approver_user_key"):
+        return "vp"
+    if next_status == STATUS_PENDING_CFO and not txn.get("cfo_approver_user_key"):
+        return "cfo"
+    return None
+
+
+def _exactly_one(user_keys, description: str) -> int:
+    distinct = sorted({k for k in user_keys or [] if k is not None})
+    if not distinct:
+        raise WorkflowConfigurationError(
+            f"No eligible {description} was found. An administrator must configure exactly one before this approval can proceed."
+        )
+    if len(distinct) > 1:
+        raise WorkflowConfigurationError(
+            f"More than one eligible {description} was found ({len(distinct)} distinct users). "
+            "An administrator must configure exactly one before this approval can proceed."
+        )
+    return distinct[0]
+
+
+def resolve_missing_approvers(txn: dict, *, find_vp_candidates, find_cfo_candidates) -> dict:
+    """
+    {"vp_approver_user_key": key} or {"cfo_approver_user_key": key} for the stage an approval is about to enter, or {}
+    when nothing needs resolving. Never replaces an assignment the transaction already has. Raises
+    WorkflowConfigurationError for zero or several candidates - no alphabetical, random or Controller fallback.
+
+    find_vp_candidates(team) / find_cfo_candidates() return the User_Keys of the active holders of the role
+    (db.get_eligible_vp_user_keys / db.get_eligible_cfo_user_keys).
+    """
+    needed = _assignee_needed_by_approval(txn)
+    if needed == "vp":
+        team = vp_team_for_classification(txn.get("entity_classification"))
+        return {"vp_approver_user_key": _exactly_one(find_vp_candidates(team), f"VP on the {team} team")}
+    if needed == "cfo":
+        return {"cfo_approver_user_key": _exactly_one(find_cfo_candidates(), "CFO")}
+    return {}

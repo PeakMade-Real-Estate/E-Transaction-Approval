@@ -522,7 +522,8 @@ class SaveAndResumeFieldTests(_Base):
                 self.assertEqual(self.store.created, [])
 
     def test_20_approver_and_controller_selections_persist(self):
-        self.save(_draft_form(approver_key="3", controller_key="2"))
+        # Unclassified: a Corporate draft always gets the automatic Corporate Controller instead of a picked one.
+        self.save(_draft_form(approver_key="3", controller_key="2", classification=""))
         body = self.resume()
         self.assertEqual(_selected_option(body, "approver"), "3")
         self.assertEqual(_selected_option(body, "controller"), "2")
@@ -838,7 +839,7 @@ class PageInitializationTests(_Base):
 
     def test_client_side_validation_honors_stored_files(self):
         self.save()
-        script = self.resume().split("function collectClientSideErrors", 1)[1][:3500]
+        script = self.resume().split("function collectClientSideErrors", 1)[1][:5000]
         for slot in ("valEv", "wireInstr", "paySup"):
             self.assertRegex(script, slot + r"\.dataset\.existing")
 

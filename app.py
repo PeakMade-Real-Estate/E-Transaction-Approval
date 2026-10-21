@@ -26,6 +26,7 @@ import os
 import random
 import time
 
+from markupsafe import escape
 from dotenv import load_dotenv
 load_dotenv()  # loads .env into os.environ; no-op if file is absent
 
@@ -35,6 +36,7 @@ import sharepoint
 import auth
 import workflow
 import banking_security
+import bulk_listing
 import authorization
 import export as export_module
 from flask_wtf import CSRFProtect
@@ -273,6 +275,8 @@ def current_roles_display() -> str:
 _INTAKE_ATTACHMENT_FIELDS = {
     "validation_evidence":   ("file_validation_evidence",   sharepoint.SECTION_VERIFICATION,      sharepoint.DOC_TYPE_VALIDATION_EVIDENCE,   False),
     "wire_ach_instructions": ("file_wire_ach_instructions", sharepoint.SECTION_RECEIVING_BANKING,  sharepoint.DOC_TYPE_WIRE_ACH_INSTRUCTIONS, True),
+    # Corporate bulk-recipient payments only (replaces Validation Evidence / External ACH/Wire Instructions).
+    "bulk_recipient_listing": ("file_bulk_recipient_listing", sharepoint.SECTION_RECEIVING_BANKING, sharepoint.DOC_TYPE_BULK_RECIPIENT_LISTING, True),
     "payment_support":       ("file_payment_support",       sharepoint.SECTION_TRANSACTION,        sharepoint.DOC_TYPE_PAYMENT_SUPPORT,       True),
 }
 
@@ -313,7 +317,15 @@ _ATTACHMENT_LABELS = {
     "validation_evidence":   "Validation Evidence",
     "wire_ach_instructions": "External ACH/Wire Instructions",
     "payment_support":       "Payment Support",
+    "bulk_recipient_listing": "Bulk Recipient Listing",
 }
+
+
+def _intake_slot_applies(field_key, bulk):
+    """Which intake upload slots belong to the submitted recipient mode (a bulk request uses the listing instead)."""
+    if bulk:
+        return field_key not in ("validation_evidence", "wire_ach_instructions")
+    return field_key != "bulk_recipient_listing"
 
 
 def _owned_draft_request_id(draft_transaction_key_raw, user_key):
@@ -369,7 +381,10 @@ def _upload_intake_attachments(request_id):
         return
     role = current_roles_display()
     failed = []
+    bulk = _recipient_mode(request.form) == RECIPIENT_MODE_BULK
     for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
+        if not _intake_slot_applies(field_key, bulk):
+            continue
         file_storage = request.files.get(field_name)
         if field_key == "validation_evidence" and (not file_storage or not file_storage.filename):
             # No new file selected this POST — correct any already-stored
@@ -411,7 +426,10 @@ def _upload_required_intake_attachments(request_id):
     if not sharepoint_enabled():
         return
     role = current_roles_display()
+    bulk = _recipient_mode(request.form) == RECIPIENT_MODE_BULK
     for field_key, (field_name, section, doc_type, is_required) in _INTAKE_ATTACHMENT_FIELDS.items():
+        if not _intake_slot_applies(field_key, bulk):
+            continue
         file_storage = request.files.get(field_name)
         if field_key == "validation_evidence" and (not file_storage or not file_storage.filename):
             # No new file selected this POST — correct any already-stored
@@ -561,8 +579,290 @@ def _require_classification(frm, errors):
         if not (frm.get("property_entity_number") or "").strip():
             errors.append("Property is required.")
     else:
-        if not (frm.get("property_dept") or "").strip():
+        entity, _, _ = _resolve_entity(frm)
+        if not (frm.get("property_dept") or "").strip() and not (entity and entity["name"]):
             errors.append("Property / Department is required.")
+
+
+ENTITY_CHOICE_MANUAL = "__manual__"
+ENTITY_MANUAL_LABEL = "Entity Not Listed \u2014 Enter Manually"
+ENTITY_ID_MAX_LENGTH = 100   # ETransaction.Entity_ID_Text is nvarchar(100)
+
+
+def _get_entity_options_safe():
+    """
+    Selectable Entity IDs: the existing active BusinessEntity rows (db.get_business_entities) that have a
+    non-blank Entity_ID, de-duplicated by Entity_ID and sorted numerically-aware. [] if SQL is off/unavailable.
+    """
+    if not database_enabled():
+        return []
+    try:
+        rows = db.get_business_entities(active_only=True)
+    except Exception:
+        app.logger.exception("Unable to load the Entity ID list")
+        return []
+    options, seen = [], set()
+    for row in rows or []:
+        entity_id = (row.get("entity_id") or "").strip()
+        if not entity_id or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        name = (row.get("name") or "").strip()
+        options.append({
+            "entity_id": entity_id,
+            "name": name,
+            "label": f"{entity_id} \u2014 {name}" if name else entity_id,
+            "classification": row.get("classification") or "",
+        })
+    options.sort(key=lambda o: (0, int(o["entity_id"]), "") if o["entity_id"].isdigit() else (1, 0, o["entity_id"].casefold()))
+    return options
+
+
+def _check_manual_entity_id(raw, *, required):
+    """(value, error) for a manually entered Entity ID: trimmed, <= the column length, no control characters."""
+    value = (raw or "").strip()
+    if not value:
+        return "", ("Enter the Entity ID, or choose one from the list." if required else None)
+    if len(value) > ENTITY_ID_MAX_LENGTH:
+        return "", f"Entity ID must be {ENTITY_ID_MAX_LENGTH} characters or fewer."
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        return "", "Entity ID contains invalid characters."
+    return value, None
+
+
+def _resolve_entity(frm):
+    """
+    (option, entity_id, error) from the intake form. A listed choice is re-validated against the SQL entity list;
+    `option` is that entity (its canonical ID and name are used - the posted label/manual text is never substituted)
+    and is None for manual, empty or legacy posts. An explicit manual choice is validated as free text; a post
+    without `entity_choice` (older clients) is treated as manual text. On error the value is "" so an unvalidated
+    value is never persisted.
+    """
+    if "entity_choice" not in frm:
+        value, error = _check_manual_entity_id(frm.get("entity_id"), required=False)
+        return None, value, error
+    choice = (frm.get("entity_choice") or "").strip()
+    if not choice:
+        return None, "", None
+    if choice == ENTITY_CHOICE_MANUAL:
+        value, error = _check_manual_entity_id(frm.get("entity_id"), required=True)
+        return None, value, error
+    for option in _get_entity_options_safe():
+        if option["entity_id"] == choice:
+            return option, option["entity_id"], None
+    return None, "", (f"The selected Entity ID is not a valid entity. Choose one from the list or select "
+                      f"\u201c{ENTITY_MANUAL_LABEL}\u201d.")
+
+
+def _resolve_entity_id(frm):
+    """(entity_id, error) - see _resolve_entity()."""
+    _, value, error = _resolve_entity(frm)
+    return value, error
+
+
+def _validate_entity_selection(frm, errors):
+    """Shared Entity ID check for Save Draft and final submit. Not applicable to Property requests."""
+    if (frm.get("classification") or "").strip().lower() == "property":
+        return
+    _, error = _resolve_entity_id(frm)
+    if error:
+        errors.append(error)
+
+
+def _entity_form_state(draft, options):
+    """
+    {'choice', 'manual'} to pre-fill the intake Entity ID controls from a resumed Draft or a re-rendered POST.
+    A stored value that is in the current list is a listed choice; any other stored value (manual or
+    historical) is shown as manual entry so it is never lost or altered.
+    """
+    listed = {o["entity_id"] for o in options}
+
+    def from_code(code):
+        code = (code or "").strip()
+        if not code:
+            return {"choice": "", "manual": ""}
+        return {"choice": code, "manual": ""} if code in listed else {"choice": ENTITY_CHOICE_MANUAL, "manual": code}
+
+    if draft:
+        if (draft.get("classification") or "") == "property":
+            return from_code("")
+        return from_code(draft.get("property_code"))
+    if request.method == "POST":
+        if "entity_choice" not in request.form:
+            return from_code(request.form.get("entity_id"))
+        choice = (request.form.get("entity_choice") or "").strip()
+        manual = request.form.get("entity_id", "")
+        if choice == ENTITY_CHOICE_MANUAL:
+            return {"choice": choice, "manual": manual}
+        return {"choice": choice if choice in listed else "", "manual": manual}
+    return from_code("")
+
+
+app.jinja_env.globals["get_entity_options"] = _get_entity_options_safe
+app.jinja_env.globals["entity_form_state"] = _entity_form_state
+app.jinja_env.globals["ENTITY_CHOICE_MANUAL"] = ENTITY_CHOICE_MANUAL
+app.jinja_env.globals["ENTITY_MANUAL_LABEL"] = ENTITY_MANUAL_LABEL
+
+
+def _resolve_corporate_controller():
+    """
+    (controller, error): the single active Controller on the Corporate (CA) team - {"user_key", "display_name"} - or an
+    error message when there are none or several. No fallback to another team, a blank-Team user or a name sort.
+    """
+    try:
+        holders = db.get_eligible_controllers(workflow.TEAM_CORPORATE)
+    except Exception:
+        app.logger.exception("Unable to look up the Corporate Controller")
+        return None, "The Corporate Controller could not be looked up right now. Please try again."
+    distinct = {h["user_key"]: h for h in holders or []}
+    if not distinct:
+        return None, ("No Corporate Controller is configured. An administrator must assign exactly one active "
+                      "Controller to the Corporate (CA) team before a Corporate request can be submitted.")
+    if len(distinct) > 1:
+        return None, ("More than one Corporate Controller is configured. An administrator must leave exactly one "
+                      "active Controller on the Corporate (CA) team before a Corporate request can be submitted.")
+    return next(iter(distinct.values())), None
+
+
+# Set by the server only (any posted value is discarded) when a Controller's request is assigned to their team's VP.
+VP_ASSIGNED_FIELD = "_vp_assigned_controller_request"
+_ASSIGN_VP, _ASSIGN_CORPORATE_CONTROLLER, _ASSIGN_PICKER = "controller_requester", "corporate_controller", "picker"
+CONTROLLER_REQUESTER_NOTE = ("Because you are submitting as a Controller, your team's VP will serve as the Approver "
+                             "and Controller for this request.")
+CORPORATE_CONTROLLER_NOTE = "Corporate requests are routed automatically to the Corporate Controller."
+
+
+def _team_label(team):
+    return "Corporate" if team == workflow.TEAM_CORPORATE else "Property"
+
+
+def _controller_requester_vp(prepared_by_user, team):
+    """
+    (vp, error): the single VP of a Controller requester's own team ({"user_key", "display_name"}). Zero or several
+    VPs, the requester themselves, or a VP who cannot act as Approver are errors - never a fallback to the requester,
+    another Controller, a blank-Team user or a name sort.
+    """
+    label = _team_label(team)
+    try:
+        keys = sorted({k for k in db.get_eligible_vp_user_keys(team) if k is not None})
+    except Exception:
+        app.logger.exception("Unable to look up the %s VP for a Controller requester", label)
+        return None, "The VP who should approve your request could not be looked up right now. Please try again."
+    if not keys:
+        return None, (f"No {label} VP is configured. An administrator must assign exactly one active VP to the "
+                      f"{label} ({team}) team before a Controller can submit a request.")
+    if len(keys) > 1:
+        return None, (f"More than one {label} VP is configured. An administrator must leave exactly one active VP on "
+                      f"the {label} ({team}) team before a Controller can submit a request.")
+    vp_key = keys[0]
+    if vp_key == prepared_by_user["user_key"]:
+        return None, (f"You are the {label} VP as well as a Controller, so your request cannot be approved by "
+                      "yourself. Contact an administrator.")
+    try:
+        roles = db.get_app_user_role_codes(vp_key)
+        vp = db.get_app_user_by_key(vp_key)
+    except Exception:
+        app.logger.exception("Unable to read the %s VP's record", label)
+        return None, "The VP who should approve your request could not be looked up right now. Please try again."
+    if vp is None or "sam" not in roles:
+        return None, (f"The {label} VP cannot act as Approver (no Approver role). An administrator must correct "
+                      "the configuration before a Controller can submit a request.")
+    return {"user_key": vp_key, "display_name": vp["display_name"]}, None
+
+
+def _assignment_plan(prepared_by_user, classification, ctx):
+    """
+    (plan, error) for who is assigned as Approver / Controller. `ctx` is db.get_requester_controller_context() for the
+    requester. plan["kind"]:
+      controller_requester  - the requester holds an active Controller role: the VP of their own team is BOTH Approver
+                              and Controller (a Controller never approves their own request);
+      corporate_controller  - any other Corporate request: the Corporate Controller is assigned automatically;
+      picker                - everything else: the requester picks from the existing role-filtered lists.
+    """
+    classification = (classification or "").strip().lower()
+    if ctx and ctx.get("is_controller"):
+        team = ctx.get("team")
+        if team not in (workflow.TEAM_CORPORATE, workflow.TEAM_PROPERTY):
+            return None, ("Your Controller role has no Corporate (CA) or Property (PA) team on file, so your request "
+                          "cannot be routed. Contact an administrator.")
+        if classification in (workflow.CORPORATE_CLASSIFICATION, workflow.PROPERTY_CLASSIFICATION) \
+                and workflow.team_for_classification(classification) != team:
+            label = _team_label(team)
+            return None, f"Your Controller role is on the {label} team, so you can only submit {label} requests."
+        vp, error = _controller_requester_vp(prepared_by_user, team)
+        if error:
+            return None, error
+        return {"kind": _ASSIGN_VP, "approver": vp, "controller": vp}, None
+    if classification == workflow.CORPORATE_CLASSIFICATION:
+        controller, error = _resolve_corporate_controller()
+        if error:
+            return None, error
+        if controller["user_key"] == prepared_by_user["user_key"]:
+            return None, ("You are the Corporate Controller, so you cannot submit a Corporate request for approval "
+                          "by yourself. Ask another requester to submit it.")
+        return {"kind": _ASSIGN_CORPORATE_CONTROLLER, "approver": None, "controller": controller}, None
+    return {"kind": _ASSIGN_PICKER, "approver": None, "controller": None}, None
+
+
+def _with_assigned_approvers(frm, prepared_by_user):
+    """
+    (form, error). Returns a copy of the posted form whose Approver / Controller are the server-decided assignments
+    (see _assignment_plan()), whatever the browser posted. The VP_ASSIGNED_FIELD marker is always discarded first and
+    set only here, so a posted value can never switch the role checks off.
+    """
+    effective = frm.copy()
+    effective.pop(VP_ASSIGNED_FIELD, None)
+    try:
+        ctx = db.get_requester_controller_context(prepared_by_user["user_key"])
+    except Exception:
+        app.logger.exception("Unable to read the requester's roles for assignment")
+        return effective, "Your role could not be verified right now. Please try again."
+    plan, error = _assignment_plan(prepared_by_user, frm.get("classification"), ctx)
+    if error:
+        return effective, error
+    if plan["controller"]:
+        effective["controller_key"] = str(plan["controller"]["user_key"])
+    if plan["kind"] == _ASSIGN_VP:
+        effective["approver_key"] = str(plan["approver"]["user_key"])
+        effective[VP_ASSIGNED_FIELD] = "1"
+    return effective, None
+
+
+def _assignment_ui():
+    """
+    Template helper: what the intake page shows for Approver / Controller, per classification ("" = not chosen yet).
+    {field: None} means the normal picker; {field: {"name", "note", "error"}} means a locked, server-assigned value.
+    The server re-applies the same rule on every submit, so this is display only.
+    """
+    ui = {"controller_requester": False, "by_class": {"": {}, "corporate": {}, "property": {}}}
+    if not database_enabled():
+        return ui
+    user = current_app_user()
+    if user is None:
+        return ui
+    try:
+        ctx = db.get_requester_controller_context(user["user_key"])
+    except Exception:
+        app.logger.exception("Unable to read the requester's roles for the intake page")
+        return ui
+    controller_requester = bool(ctx and ctx.get("is_controller"))
+    ui["controller_requester"] = controller_requester
+    for classification in ui["by_class"]:
+        plan, error = _assignment_plan(user, classification, ctx)
+        if error:
+            fields = ("approver", "controller") if controller_requester else ("controller",)
+            ui["by_class"][classification] = {f: {"name": "", "note": "", "error": error} for f in fields}
+        elif plan["kind"] == _ASSIGN_VP:
+            ui["by_class"][classification] = {
+                f: {"name": plan[f]["display_name"], "note": CONTROLLER_REQUESTER_NOTE, "error": ""}
+                for f in ("approver", "controller")}
+        elif plan["kind"] == _ASSIGN_CORPORATE_CONTROLLER:
+            ui["by_class"][classification] = {
+                "controller": {"name": plan["controller"]["display_name"], "note": CORPORATE_CONTROLLER_NOTE, "error": ""}}
+    return ui
+
+
+app.jinja_env.globals["assignment_ui"] = _assignment_ui
 
 
 def _intake_property_fields(frm):
@@ -575,7 +875,11 @@ def _intake_property_fields(frm):
     classification = (frm.get("classification") or "").strip().lower()
     property_entity_number = (frm.get("property_entity_number") or "").strip()
     property_dept = frm.get("property_dept", "")
-    property_code = frm.get("entity_id", "")
+    property_code = ""
+    if classification != "property":
+        entity, property_code, _ = _resolve_entity(frm)
+        if entity and entity["name"]:
+            property_dept = entity["name"]   # the Department of a listed entity comes from SQL, not the browser
     if classification == "property":
         resolved_name = _resolve_property_name(property_entity_number)
         if resolved_name:
@@ -609,14 +913,128 @@ def effective_urgency(frm):
 
 RECIPIENT_MODE_EXTERNAL = "external"
 RECIPIENT_MODE_INTERNAL = "internal"
+RECIPIENT_MODE_BULK = "bulk"
 # A maintained internal BankAccount may be the recipient only for these request
 # types; Wire, ACH Pull, EFT and Same Day ACH keep external-recipient behavior.
 INTERNAL_RECIPIENT_REQUEST_TYPES = ("ACH", "Intra Bank Transfer")
+# Corporate bulk-recipient payments: the only request types that may carry a recipient listing.
+BULK_RECIPIENT_REQUEST_TYPES = ("ACH", REQUEST_TYPE_SAME_DAY_ACH, "Wire")
+BULK_LISTING_FIELD = "file_bulk_recipient_listing"
+BULK_LISTING_SLOT = "bulk_recipient_listing"
+BULK_UNAVAILABLE_MESSAGE = "Bulk recipient payments are not available."
+
+
+def bulk_recipient_enabled():
+    """
+    The bulk-recipient feature gate (BULK_RECIPIENT_ENABLED=true AND the migrated SQL schema present).
+    Fails closed: any error reading the gate means the feature is off.
+    """
+    try:
+        return db.bulk_recipient_enabled() is True
+    except Exception:
+        app.logger.exception("Unable to evaluate the bulk-recipient feature gate")
+        return False
 
 
 def _recipient_mode(frm):
     """Submitted recipient mode, defaulting to External for compatibility."""
     return (frm.get("recipient_mode") or "").strip().lower() or RECIPIENT_MODE_EXTERNAL
+
+
+def _validate_bulk_selection(frm):
+    """
+    Static rules for a bulk-recipient request (the listing itself is verified separately):
+    gate on; Corporate only; ACH / Same Day ACH / Wire only; no single-recipient key injected.
+    """
+    if not bulk_recipient_enabled():
+        return [BULK_UNAVAILABLE_MESSAGE]
+    errors = []
+    if (frm.get("recipient_bank_account_key") or "").strip():
+        errors.append("A maintained internal bank account cannot be combined with a bulk recipient listing.")
+    if (frm.get("classification") or "").strip().lower() != "corporate":
+        errors.append("Bulk recipient payments are available for Corporate requests only.")
+    request_type = (frm.get("request_type") or "").strip()
+    if request_type and request_type not in BULK_RECIPIENT_REQUEST_TYPES:
+        errors.append("Bulk recipient payments are available for ACH, Same Day ACH and Wire requests only.")
+    return errors
+
+
+def _read_posted_bulk_listing():
+    """(filename, bytes) of the listing file selected in THIS POST (bounded read; stream rewound), else None."""
+    file_storage = request.files.get(BULK_LISTING_FIELD)
+    if not file_storage or not file_storage.filename:
+        return None
+    content = file_storage.stream.read(bulk_listing.max_file_bytes() + 1)
+    file_storage.stream.seek(0)
+    return file_storage.filename, content
+
+
+def _verify_bulk_listing(frm, draft_request_id):
+    """
+    Authoritatively verify the recipient listing: the file newly posted, else the one already stored for
+    the caller's own Draft. Returns a bulk_listing.BulkValidation, or None when there is no listing.
+    The result carries only row numbers, BankAccount keys and fixed messages — never banking values.
+    """
+    listing = _read_posted_bulk_listing()
+    if listing is None and draft_request_id and sharepoint_enabled():
+        try:
+            listing = sharepoint.read_latest_bulk_listing(draft_request_id, bulk_listing.max_file_bytes())
+        except Exception:
+            app.logger.exception("Unable to read the stored bulk recipient listing for %s", draft_request_id)
+            return bulk_listing.BulkValidation(
+                errors=["The stored recipient listing could not be read. Please attach it again."])
+    if listing is None:
+        return None
+    filename, content = listing
+    originating = (frm.get("bank_account_key") or "").strip()
+    return bulk_listing.validate_bulk_listing(
+        content, filename,
+        originating_bank_account_key=int(originating) if originating.isdigit() else None,
+        matcher=db.match_bulk_recipient_accounts,
+    )
+
+
+def _stored_listing_matches(request_id, bulk_validation):
+    """
+    True when the newest Bulk Recipient Listing SharePoint holds for the request is byte-identical (SHA-256)
+    to the file whose verification is about to be persisted. Skipped (True) when SharePoint is disabled;
+    any read failure counts as a mismatch.
+    """
+    if not sharepoint_enabled():
+        return True
+    try:
+        stored = sharepoint.read_latest_bulk_listing(request_id, bulk_listing.max_file_bytes())
+    except Exception:
+        app.logger.exception("Unable to re-read the stored bulk recipient listing for %s", request_id)
+        return False
+    return stored is not None and bulk_listing.sha256_hex(stored[1]) == bulk_validation.sha256
+
+
+def _recipient_mode_fields(frm, bulk_validation=None):
+    """
+    Persistence fields for the recipient mode. Empty while the bulk feature is off, so an unmigrated database
+    is never written Recipient_Mode. In bulk mode the verification-specific fields that do not apply
+    (AVS, previously-used history, single-recipient key) are forced to their "not applicable" values
+    whatever the browser posted, and the recipients stored are exactly those verified in this request.
+    """
+    if not bulk_recipient_enabled():
+        return {}
+    mode = _recipient_mode(frm)
+    if mode != RECIPIENT_MODE_BULK:
+        return {"recipient_mode": "Internal" if mode == RECIPIENT_MODE_INTERNAL else "External"}
+    verified = bulk_validation is not None and bulk_validation.ok
+    return {
+        "recipient_mode": db.RECIPIENT_MODE_DB_BULK,
+        "bulk_recipients": bulk_validation.recipients if verified else [],
+        "bulk_listing_sha256": bulk_validation.sha256 if verified else None,
+        "recipient_bank_account_key": None,
+        "instructions_previously_used": False,
+        "last_used_date": "",
+        "prior_transaction_key": None,
+        "avs_score": "",
+        "external_source": False,
+        "internal_doc_not_used": False,
+    }
 
 
 def _load_recipient_summary(frm):
@@ -653,8 +1071,10 @@ def _validate_recipient_selection(frm, recipient_summary):
     mode = _recipient_mode(frm)
     raw_key = (frm.get("recipient_bank_account_key") or "").strip()
 
-    if mode not in (RECIPIENT_MODE_EXTERNAL, RECIPIENT_MODE_INTERNAL):
+    if mode not in (RECIPIENT_MODE_EXTERNAL, RECIPIENT_MODE_INTERNAL, RECIPIENT_MODE_BULK):
         return ["Recipient type is invalid."]
+    if mode == RECIPIENT_MODE_BULK:
+        return _validate_bulk_selection(frm)
     if mode == RECIPIENT_MODE_EXTERNAL:
         if raw_key:
             return ["A maintained internal bank account cannot be combined with an external recipient."]
@@ -779,6 +1199,7 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
         errors.append("Please select a valid Request Type.")
     require("treasury_service_date", "Requested Treasury Service Date")
     _require_classification(frm, errors)
+    _validate_entity_selection(frm, errors)
     require("approver_key", "Approver")
     require("controller_key", "Controller")
     require("payment_purpose", "Payment Purpose / Description")
@@ -815,8 +1236,10 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
         errors.append("The selected Originating Bank Account is closed and cannot be used.")
 
     # D. Receiving / beneficiary bank information
-    require("recv_payee_name", "Recipient / Payee Name")
     recipient_mode = _recipient_mode(frm)
+    bulk = recipient_mode == RECIPIENT_MODE_BULK
+    if not bulk:
+        require("recv_payee_name", "Recipient / Payee Name")
     recipient_errors = _validate_recipient_selection(frm, recipient_summary)
     errors.extend(recipient_errors)
     instructions_exempt = False
@@ -833,7 +1256,7 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
             originating_key=frm.get("bank_account_key"), originating_status=bank_account_status,
             recipient_key=recipient_summary.get("bank_account_key"), recipient_status=recipient_summary.get("status"),
         )
-    if recipient_mode != RECIPIENT_MODE_INTERNAL:
+    if recipient_mode not in (RECIPIENT_MODE_INTERNAL, RECIPIENT_MODE_BULK):
         require("recv_bank_name", "Receiving Bank Name")
         require("recv_account_name", "Receiving Account Name")
         # Batch 8: a blank account/routing number is only acceptable when finalizing
@@ -849,10 +1272,16 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
             errors.append("Receiving Bank / Beneficiary Address is required for Wire transactions.")
 
     # E/F. Required attachments (mirrors intake.html validateAttachments())
-    if not files_present.get("validation_evidence"):
-        errors.append("Validation Evidence attachment is required.")
-    if not files_present.get("wire_ach_instructions") and not instructions_exempt:
-        errors.append("External ACH/Wire Instructions attachment is required.")
+    if bulk:
+        # The recipient listing stands in for the External ACH/Wire Instructions; AVS / Validation
+        # Evidence do not apply (every recipient is a maintained internal BankAccount).
+        if not files_present.get(BULK_LISTING_SLOT):
+            errors.append("Bulk Recipient Listing attachment is required.")
+    else:
+        if not files_present.get("validation_evidence"):
+            errors.append("Validation Evidence attachment is required.")
+        if not files_present.get("wire_ach_instructions") and not instructions_exempt:
+            errors.append("External ACH/Wire Instructions attachment is required.")
     if not files_present.get("payment_support"):
         errors.append("Payment Support attachment is required.")
 
@@ -861,7 +1290,7 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
     # document — there is no separate alternative-verification field to check,
     # so the AVS>=90/below-90/unavailable branches all reduce to the same E/F
     # attachment-presence check above; only the numeric range is AVS-specific.
-    avs_raw = (frm.get("avs_score") or "").strip()
+    avs_raw = "" if bulk else (frm.get("avs_score") or "").strip()
     if avs_raw:
         try:
             avs_score = int(avs_raw)
@@ -873,7 +1302,8 @@ def _validate_intake_submission(frm, *, files_present: dict, bank_account_status
 
     # H. New / unverified instructions — verbal confirmation with a KNOWN
     # CONTACT specifically (not "confirmed with the requester") is required.
-    if frm.get("instructions_previously_used") != "yes":
+    # A bulk request is never "previously used" (there is no single instruction history to match).
+    if bulk or frm.get("instructions_previously_used") != "yes":
         if frm.get("verbal_confirmed_with_known") != "on":
             errors.append("Verbal confirmation with a known contact is required for new/unverified banking instructions.")
         if not (frm.get("verbal_contact_name") or "").strip():
@@ -904,6 +1334,8 @@ def _resolve_prior_use_match(frm, *, draft_transaction_key_raw, prepared_by_user
     Never raises — fails safe to None (treated as "no match found", the
     stricter outcome) on any lookup error.
     """
+    if _recipient_mode(frm) == RECIPIENT_MODE_BULK:
+        return None  # a bulk request has no single instruction to match against history
     if _recipient_mode(frm) == RECIPIENT_MODE_INTERNAL:
         # Internal recipient: the browser never holds the real account/routing
         # numbers (only the BankAccount key), so the match is made against the
@@ -959,7 +1391,12 @@ def _validate_eligible_approver_controller(frm):
     crafted direct POST could still submit any user_key — shared by the
     final submission and the /intake/precheck endpoint so both re-verify
     server-side identically.
+
+    A Controller's request is assigned to their team's VP as BOTH Approver and Controller (server-decided and already
+    checked in _controller_requester_vp()); the VP is not required to hold the 'controller' role for that case.
     """
+    if frm.get(VP_ASSIGNED_FIELD) == "1":
+        return []
     errors = []
     for field, label, role_code in (("approver_key", "Approver", "sam"), ("controller_key", "Controller", "controller")):
         raw = (frm.get(field) or "").strip()
@@ -1045,9 +1482,11 @@ def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
     require("approver_key", "Approver")
     require("controller_key", "Controller")
     require("bank_account_key", "Originating Bank Account")
-    require("recv_payee_name", "Recipient / Payee Name")
+    draft_mode = _recipient_mode(frm)
+    if draft_mode != RECIPIENT_MODE_BULK:
+        require("recv_payee_name", "Recipient / Payee Name")
     errors.extend(_validate_recipient_selection(frm, recipient_summary))
-    if _recipient_mode(frm) != RECIPIENT_MODE_INTERNAL:
+    if draft_mode not in (RECIPIENT_MODE_INTERNAL, RECIPIENT_MODE_BULK):
         require("recv_bank_name", "Receiving Bank Name")
         if not is_update:
             require("recv_account_number", "Receiving Account Number")
@@ -1060,6 +1499,7 @@ def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
         errors.append("Select a Property, or switch to Corporate.")
     elif classification and classification not in ("property", "corporate"):
         errors.append("Select whether this request is for a Property or Corporate.")
+    _validate_entity_selection(frm, errors)
 
     request_type = (frm.get("request_type") or "").strip()
     if request_type and request_type not in _DRAFT_ALLOWED_REQUEST_TYPES:
@@ -1089,8 +1529,8 @@ def _validate_draft_submission(frm, *, is_update=False, recipient_summary=None):
             errors.append(f"{label} looks like a masked placeholder, not a real value.")
 
     # Verification fields are optional for a Draft, but whatever is supplied must be well-formed
-    # (never silently dropped or coerced).
-    avs_raw = (frm.get("avs_score") or "").strip()
+    # (never silently dropped or coerced). AVS does not apply to a bulk request.
+    avs_raw = "" if draft_mode == RECIPIENT_MODE_BULK else (frm.get("avs_score") or "").strip()
     if avs_raw:
         try:
             avs_ok = 0 <= int(avs_raw) <= 100
@@ -1209,6 +1649,7 @@ def inject_globals():
         "can_switch_role": identity["source"] == "dev",
         "can_view_bank_accounts": can_view_bank_accounts(),
         "can_edit_bank_accounts": can_edit_bank_accounts(),
+        "bulk_recipient_enabled": bulk_recipient_enabled(),
         "properties": _get_properties_safe(),
         "idle_timeout_enabled": bool(roles),
         "idle_timeout_minutes": app.config["IDLE_TIMEOUT_MINUTES"],
@@ -1575,13 +2016,27 @@ def _handle_save_draft(frm, prepared_by_user):
                     errors.append(f"The selected {label} could not be found.")
                 elif int(raw) == prepared_by_user["user_key"]:
                     errors.append(f"You cannot select yourself as the {label} for your own request.")
-                elif role_code not in db.get_app_user_role_codes(int(raw)):
+                elif frm.get(VP_ASSIGNED_FIELD) != "1" and role_code not in db.get_app_user_role_codes(int(raw)):
                     errors.append(f"The selected {label} is not an eligible {label}.")
             except ValueError:
                 errors.append(f"{label} is invalid.")
 
     if errors:
         return _render_intake_form_again(prepared_by_user, errors)
+
+    # Bulk recipients: a listing newly attached to this save must verify completely before anything is
+    # saved or uploaded; an already-stored listing that no longer verifies is reported after the save
+    # (its verified recipients are cleared so a stale verification can never be reused).
+    bulk_mode = _recipient_mode(frm) == RECIPIENT_MODE_BULK
+    bulk_validation = None
+    stored_listing_problems = []
+    if bulk_mode:
+        bulk_validation = _verify_bulk_listing(
+            frm, _owned_draft_request_id(draft_transaction_key_raw, prepared_by_user["user_key"]))
+        if bulk_validation is not None and not bulk_validation.ok:
+            if _read_posted_bulk_listing() is not None:
+                return _render_intake_form_again(prepared_by_user, bulk_validation.errors)
+            stored_listing_problems = bulk_validation.errors
 
     urgent, urgency_reason = effective_urgency(frm)
     user_key = prepared_by_user["user_key"]
@@ -1590,7 +2045,7 @@ def _handle_save_draft(frm, prepared_by_user):
     # match; final submission re-derives and re-checks it regardless of what is stored here.
     prior_transaction_key = None
     prior_use_ack = (frm.get("prior_use_ack") or "").strip()
-    if frm.get("instructions_previously_used") == "yes" and prior_use_ack:
+    if not bulk_mode and frm.get("instructions_previously_used") == "yes" and prior_use_ack:
         prior_match = _resolve_prior_use_match(
             frm, draft_transaction_key_raw=draft_transaction_key_raw, prepared_by_user_key=user_key)
         if prior_match and prior_match.get("request_id") == prior_use_ack:
@@ -1634,6 +2089,7 @@ def _handle_save_draft(frm, prepared_by_user):
         "avs_score":             (frm.get("avs_score") or "").strip(),
         "external_source":       frm.get("external_source") == "on",
         "internal_doc_not_used": frm.get("internal_doc_not_used") == "on",
+        **_recipient_mode_fields(frm, bulk_validation),
     }
 
     try:
@@ -1658,6 +2114,7 @@ def _handle_save_draft(frm, prepared_by_user):
         return _render_intake_form_again(prepared_by_user, [])
 
     # The Draft is stored; only now report on documents, so a failed upload is never shown as a success.
+    listing_unconfirmed = False
     try:
         _upload_intake_attachments(request_id)
     except AttachmentUploadError as exc:
@@ -1666,8 +2123,20 @@ def _handle_save_draft(frm, prepared_by_user):
             f"{', '.join(exc.labels)}. Select them again and click Save Draft to retry.",
             "warning",
         )
+        listing_unconfirmed = "Bulk Recipient Listing" in exc.labels
     else:
         flash(saved_message, "success")
+        listing_unconfirmed = bulk_validation is not None and bulk_validation.ok and not _stored_listing_matches(
+            request_id, bulk_validation)
+    if listing_unconfirmed:
+        # The verified recipients describe a file that is not what SharePoint holds: drop them, never keep them.
+        try:
+            db.set_draft_bulk_recipients(transaction_key, user_key, [], None)
+        except Exception:
+            app.logger.exception("Unable to clear the unconfirmed bulk recipients for draft %s", transaction_key)
+        flash("The recipient listing could not be confirmed as stored. Attach it again and Save Draft.", "warning")
+    if stored_listing_problems:
+        flash("The attached recipient listing does not currently verify: " + " ".join(stored_listing_problems[:5]), "warning")
 
     return redirect(url_for("intake_draft_edit", transaction_key=transaction_key))
 
@@ -1765,6 +2234,10 @@ def intake_draft_edit(transaction_key):
     if draft is None:
         flash("Draft not found, not yours, or no longer editable.", "warning")
         return redirect(url_for("dashboard"))
+    if draft.get("recipient_mode") == RECIPIENT_MODE_BULK and not bulk_recipient_enabled():
+        flash("This draft uses bulk recipients, which are currently unavailable, so it cannot be edited "
+              "or submitted until the feature is enabled again.", "warning")
+        return redirect(url_for("dashboard"))
     users, bank_accounts = [], []
     approver_users, controller_users = [], []
     try:
@@ -1830,6 +2303,12 @@ def intake_submit():
 
     # Batch 8: Save Draft is a distinct operation from Submit Request — handled
     # entirely separately (light validation only, no workflow/events started).
+    if _db_on:
+        frm, assignment_error = _with_assigned_approvers(frm, prepared_by_user)
+        if assignment_error:
+            flash(assignment_error, "warning")
+            return _render_intake_form_again(prepared_by_user, [assignment_error])
+
     if _db_on and frm.get("form_mode") == "draft":
         return _handle_save_draft(frm, prepared_by_user)
 
@@ -1946,6 +2425,9 @@ def intake_submit():
             "wire_ach_instructions": bool(request.files.get("file_wire_ach_instructions") and request.files["file_wire_ach_instructions"].filename),
             "payment_support":       bool(request.files.get("file_payment_support") and request.files["file_payment_support"].filename),
         }
+        if _recipient_mode(frm) == RECIPIENT_MODE_BULK:
+            newly_selected[BULK_LISTING_SLOT] = bool(
+                request.files.get(BULK_LISTING_FIELD) and request.files[BULK_LISTING_FIELD].filename)
         files_present = (
             _resolve_files_present(draft_request_id or "", newly_selected=newly_selected)
             if draft_transaction_key_raw else newly_selected
@@ -1970,10 +2452,21 @@ def intake_submit():
         if not errors:
             errors.extend(_validate_eligible_approver_controller(frm))
 
+        # Bulk recipients: every row of the attached listing must resolve to exactly one Open
+        # BankAccount (one miss blocks the whole request). AVS and previously-used history do not apply.
+        bulk_mode = _recipient_mode(frm) == RECIPIENT_MODE_BULK
+        bulk_validation = None
+        if not errors and bulk_mode:
+            bulk_validation = _verify_bulk_listing(frm, draft_request_id)
+            if bulk_validation is None:
+                errors.append("Bulk Recipient Listing attachment is required.")
+            else:
+                errors.extend(bulk_validation.errors)
+
         # Part 2 — validate the "Previously Used" claim against completed history.
         # Only meaningful once the basic receiving-bank fields themselves are valid.
         prior_transaction_key = None
-        if not errors:
+        if not errors and not bulk_mode:
             prior_match = _resolve_prior_use_match(
                 frm, draft_transaction_key_raw=draft_transaction_key_raw,
                 prepared_by_user_key=prepared_by_user["user_key"],
@@ -2012,6 +2505,10 @@ def intake_submit():
                         f"{', '.join(exc.labels)}. Please select them again and submit.",
                         "danger",
                     )
+                    return _render_intake_form_again(prepared_by_user, [])
+                if bulk_validation is not None and not _stored_listing_matches(request_id, bulk_validation):
+                    flash("The stored recipient listing could not be confirmed to match the verified file. "
+                          "Nothing was submitted; please attach the listing again.", "danger")
                     return _render_intake_form_again(prepared_by_user, [])
                 _vdt_raw = frm.get("verbal_confirm_datetime", "")
                 _vdt = (_vdt_raw.replace("T", " ") + ":00") if _vdt_raw else ""
@@ -2055,6 +2552,7 @@ def intake_submit():
                         requires_vp=resolved_rule["requires_vp"], requires_cfo=resolved_rule["requires_cfo"],
                         entity_classification=(frm.get("classification") or "").strip().lower(),
                     ),
+                    **_recipient_mode_fields(frm, bulk_validation),
                 }
                 db.finalize_draft_submission(transaction_key, finalize_data, prepared_by_user_key=prepared_by_user["user_key"])
                 flash("Request submitted successfully.", "success")
@@ -2080,6 +2578,10 @@ def intake_submit():
             # transaction exists — if a required upload fails, no ETransaction
             # row is ever created (see _upload_required_intake_attachments()).
             _upload_required_intake_attachments(request_id)
+            if bulk_validation is not None and not _stored_listing_matches(request_id, bulk_validation):
+                flash("The stored recipient listing could not be confirmed to match the verified file. "
+                      "Nothing was submitted; please attach the listing again.", "danger")
+                return _render_intake_form_again(prepared_by_user, [])
 
             _vdt_raw = frm.get("verbal_confirm_datetime", "")
             _vdt = (_vdt_raw.replace("T", " ") + ":00") if _vdt_raw else ""
@@ -2123,6 +2625,7 @@ def intake_submit():
                 "recv_contact_name":     frm.get("recv_contact_name", ""),
                 "recv_contact_email":    frm.get("recv_contact_email", ""),
                 "recv_contact_phone":    frm.get("recv_contact_phone", ""),
+                **_recipient_mode_fields(frm, bulk_validation),
             }
             request_id = db.insert_transaction(db_data)
             return redirect(url_for("confirmation", request_id=request_id))
@@ -2225,12 +2728,19 @@ def intake_precheck():
                        "this request cannot be submitted. Contact an administrator."],
         })
 
+    if _db_on:
+        frm, assignment_error = _with_assigned_approvers(frm, prepared_by_user)
+        if assignment_error:
+            return jsonify({"success": True, "errors": [assignment_error]})
+
     draft_transaction_key_raw = frm.get("transaction_key", "").strip()
     newly_selected = {
         "validation_evidence":   frm.get("has_validation_evidence") == "true",
         "wire_ach_instructions": frm.get("has_wire_ach_instructions") == "true",
         "payment_support":       frm.get("has_payment_support") == "true",
     }
+    if _recipient_mode(frm) == RECIPIENT_MODE_BULK:
+        newly_selected[BULK_LISTING_SLOT] = frm.get("has_bulk_recipient_listing") == "true"
     files_present = (
         _resolve_files_present(
             _owned_draft_request_id(draft_transaction_key_raw, prepared_by_user["user_key"]) or ""
@@ -2268,7 +2778,17 @@ def intake_precheck():
         except Exception:
             pass  # non-numeric amount already rejected by _validate_intake_submission
 
-    if not errors and _db_on and prepared_by_user is not None:
+    bulk_mode = _recipient_mode(frm) == RECIPIENT_MODE_BULK
+    if not errors and _db_on and bulk_mode and prepared_by_user is not None \
+            and frm.get("has_bulk_recipient_listing") != "true":
+        # No new file is being asserted, so verify the listing already stored for this Draft (a newly
+        # selected file is verified by /intake/bulk-listing/check, which receives the file itself).
+        stored = _verify_bulk_listing(
+            frm, _owned_draft_request_id(draft_transaction_key_raw, prepared_by_user["user_key"]))
+        if stored is not None:
+            errors.extend(stored.errors)
+
+    if not errors and _db_on and prepared_by_user is not None and not bulk_mode:
         prior_match = _resolve_prior_use_match(
             frm, draft_transaction_key_raw=draft_transaction_key_raw,
             prepared_by_user_key=prepared_by_user["user_key"],
@@ -2311,6 +2831,29 @@ def intake_prior_use_check():
         "matched": True,
         "request_id": prior_match["request_id"],
         "last_used_date": prior_match["last_used_date"],
+    })
+
+
+@app.route("/intake/bulk-listing/check", methods=["POST"])
+def intake_bulk_listing_check():
+    """
+    Read-only verification of a bulk recipient listing selected on the intake page, so the requester
+    sees every problem BEFORE submitting (a page reload would drop the selected files). Stores and
+    uploads nothing, creates no transaction, and is never trusted by /intake/submit, which re-verifies
+    the file itself. The response carries only counts, row numbers and fixed messages — never an
+    account or routing number. CSRF-protected like every other POST; submitter role required.
+    """
+    if not has_role("submitter"):
+        return jsonify({"success": False, "reason": "Unauthorized."}), 403
+    if not database_enabled() or not bulk_recipient_enabled():
+        return jsonify({"success": False, "reason": BULK_UNAVAILABLE_MESSAGE}), 400
+    result = _verify_bulk_listing(request.form, None)
+    if result is None:
+        return jsonify({"success": True, "ok": False, "errors": ["Select the recipient listing (.xlsx)."],
+                        "row_count": 0, "matched_count": 0})
+    return jsonify({
+        "success": True, "ok": result.ok, "errors": result.errors,
+        "row_count": result.row_count, "matched_count": result.matched_count,
     })
 
 
@@ -2521,6 +3064,12 @@ def dashboard():
 
     scoped, authorized_group_keys, accounting_group_key = _resolve_dashboard_authorized_scope(roles, user_key)
 
+    # A row needs MY response only when it awaits the requester and I am that requester (status data already loaded).
+    for r in scoped:
+        r["response_required"] = bool(
+            user_key is not None and "submitter" in roles
+            and r.get("status") == workflow.STATUS_MORE_INFO and r.get("prepared_by_user_key") == user_key)
+
     stats = {
         "total":              len(scoped),
         "pending_sam":        sum(1 for r in scoped if r["status"] in ("Pending SAM Approval", workflow.STATUS_PENDING_APPROVER)),
@@ -2531,6 +3080,7 @@ def dashboard():
         "pending_release":    sum(1 for r in scoped if r["status"] in ("Pending Release", workflow.STATUS_AWAITING_RELEASE)),
         "completed":          sum(1 for r in scoped if r["status"] in ("Completed", "Released", workflow.STATUS_TREASURY_RELEASED, workflow.STATUS_COMPLETED)),
         "needs_more_info":    sum(1 for r in scoped if r["status"] in ("Needs More Information", workflow.STATUS_MORE_INFO)),
+        "awaiting_my_response": sum(1 for r in scoped if r["response_required"]),
         "rejected":           sum(1 for r in scoped if r["status"] in ("Rejected", workflow.STATUS_CANCELLED)),
         "urgent":             sum(1 for r in scoped if r.get("urgent", False)),
         "over_1m":            sum(1 for r in scoped if r.get("amount", 0) > 1_000_000),
@@ -2892,6 +3442,25 @@ def request_detail(request_id):
         except Exception:
             app.logger.exception("Unable to load reassignment candidates for %s", request_id)
 
+    display["can_respond_rfi"] = False
+    display["rfi_response_text"] = request.form.get("comment", "") if request.method == "POST" else ""
+    rfi = display.get("rfi")
+    if from_sql and rfi is not None:
+        try:
+            workflow.authorize_action(
+                role=roles, user_key=user_key, txn=txn_summary, action=workflow.ACTION_REQUESTER_RESPOND)
+            display["can_respond_rfi"] = True
+        except workflow.UnauthorizedActionError:
+            pass
+        # Where the response goes is decided by the workflow engine itself (never re-implemented here).
+        _status, _owner, role_label, _ = workflow.determine_next_step(
+            dict(txn_summary, rfi_origin_status=rfi.get("origin_status")), workflow.ACTION_REQUESTER_RESPOND)
+        name_field = {"Approver": "approver", "Controller": "controller", "VP": "vp_approver", "CFO": "cfo_approver"}
+        rfi["return_status"] = _status
+        rfi["return_role"] = role_label
+        rfi["return_to"] = record.get(name_field.get(role_label, "")) or ""
+        rfi["new_attachments"] = []
+
     if sharepoint_enabled():
         try:
             sp_items = sharepoint.list_attachments(request_id)
@@ -2934,6 +3503,8 @@ def request_detail(request_id):
         display["attachment_urls"]   = attachment_urls
         display["extra_attachments"] = extra_attachments
         display["treasury_evidence"] = treasury_evidence
+        if display.get("rfi") is not None:
+            display["rfi"]["new_attachments"] = _attachments_since(sp_items, display["rfi"].get("requested_dt"))
 
     return render_template("request_detail.html", record=display)
 
@@ -3060,6 +3631,28 @@ def request_action(request_id):
     return _handle_legacy_session_action(request_id)
 
 
+def _attachments_since(items, since_dt):
+    """
+    File names of the SharePoint items uploaded after `since_dt`. Event_DateTime is stored as naive local server
+    time (datetime.now() in db.py) while Graph's createdDateTime is UTC, so both sides are compared as aware UTC.
+    """
+    if since_dt is None:
+        return []
+    since_utc = since_dt.astimezone(timezone.utc)
+    names = []
+    for item in items:
+        uploaded_raw = item.get("uploaded_date", "")
+        if not uploaded_raw:
+            continue
+        try:
+            uploaded_dt = datetime.fromisoformat(uploaded_raw.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if uploaded_dt > since_utc:
+            names.append(item.get("original_filename") or item.get("filename") or "")
+    return names
+
+
 def _has_new_attachment_since_rfi(transaction_key, request_id):
     """
     True if any SharePoint attachment for this request was uploaded after the
@@ -3074,28 +3667,39 @@ def _has_new_attachment_since_rfi(transaction_key, request_id):
         rfi_dt = db.get_last_rfi_event_datetime(transaction_key)
         if rfi_dt is None:
             return False
-        # Event_DateTime is stored as naive local server time (datetime.now() in
-        # db.py); SharePoint/Graph's createdDateTime is UTC. .astimezone() on a
-        # naive datetime presumes the system's local timezone, so this converts
-        # both sides to the same aware UTC reference for a correct comparison
-        # (a naive numeric comparison previously made every attachment look new).
-        rfi_dt_utc = rfi_dt.astimezone(timezone.utc)
-        for att in sharepoint.list_attachments(request_id):
-            uploaded_raw = att.get("uploaded_date", "")
-            if not uploaded_raw:
-                continue
-            try:
-                uploaded_dt = datetime.fromisoformat(uploaded_raw.replace("Z", "+00:00"))
-            except ValueError:
-                continue
-            if uploaded_dt > rfi_dt_utc:
-                return True
+        return bool(_attachments_since(sharepoint.list_attachments(request_id), rfi_dt))
     except Exception:
         app.logger.exception("Unable to check for new attachments since RFI on %s", request_id)
     return False
 
 
 def _handle_sql_workflow_action(request_id, txn):
+    """
+    Apply a workflow action. A requester response (requester_respond) that does NOT advance the workflow is answered
+    by re-rendering the transaction (not redirecting) so the text the requester typed is kept on the page.
+    """
+    outcome = {"advanced": False}
+    response = _apply_sql_workflow_action(request_id, txn, outcome)
+    if request.form.get("action") == workflow.ACTION_REQUESTER_RESPOND and not outcome["advanced"]:
+        return request_detail(request_id)
+    return response
+
+
+def _rfi_response_success_message(request_id, new_status, owner_role, owner_key):
+    """Flash text confirming a response was recorded and where it went (names are escaped: flashes render as HTML)."""
+    who = ""
+    if owner_key is not None:
+        try:
+            owner = db.get_app_user_by_key(owner_key)
+            who = (owner or {}).get("display_name", "")
+        except Exception:
+            app.logger.exception("Unable to look up the RFI response recipient for %s", request_id)
+    recipient = f"the {escape(owner_role or 'reviewer')}" + (f" ({escape(who)})" if who else "")
+    return (f"<strong>Response submitted.</strong> {escape(request_id)} has been returned to {recipient} for review "
+            f"and is now <strong>{escape(new_status)}</strong>.")
+
+
+def _apply_sql_workflow_action(request_id, txn, outcome):
     """Authorize and apply a workflow action against a SQL-backed transaction."""
     action  = request.form.get("action", "")
     comment = request.form.get("comment", "").strip()
@@ -3121,18 +3725,24 @@ def _handle_sql_workflow_action(request_id, txn):
         flash("A cancellation reason is required.", "warning")
         return redirect(url_for("request_detail", request_id=request_id))
 
+    if action == workflow.ACTION_REQUESTER_RESPOND:
+        # Authorize FIRST: the checks below read SharePoint and must never run for someone who may not respond.
+        try:
+            workflow.authorize_action(role=roles, user_key=user_key, txn=txn, action=action)
+        except workflow.UnauthorizedActionError as exc:
+            flash(str(exc), "warning")
+            return redirect(url_for("request_detail", request_id=request_id))
+    resubmit_files = ([f for f in request.files.getlist("resubmit_file") if f and f.filename]
+                      if action == workflow.ACTION_REQUESTER_RESPOND else [])
+
     if action == workflow.ACTION_REQUESTER_RESPOND and not comment:
-        # A resubmission must carry new information — either a comment here,
-        # a file attached in this same submission (resubmitModal), or a file
-        # attached earlier via the Additional Attachments section after the
-        # RFI was raised. Without this, requester_respond would silently move
-        # the transaction back to the approver with nothing new to review.
-        resubmit_file = request.files.get("resubmit_file")
-        has_new_file = bool(resubmit_file and resubmit_file.filename)
-        if not has_new_file and not _has_new_attachment_since_rfi(txn["transaction_key"], request_id):
+        # A response must carry new information — a comment, a file attached in this same submission, or a file
+        # attached earlier (Additional Attachments) after the RFI was raised. Without this, requester_respond
+        # would silently move the transaction back to the reviewer with nothing new to look at.
+        if not resubmit_files and not _has_new_attachment_since_rfi(txn["transaction_key"], request_id):
             flash(
-                "Add a comment or attach a new file before resubmitting — "
-                "the approver needs to see what changed.",
+                "Your response was not submitted: add a comment or attach a document first — "
+                "the reviewer needs to see what changed. This transaction is still waiting for your information.",
                 "warning",
             )
             return redirect(url_for("request_detail", request_id=request_id))
@@ -3152,6 +3762,15 @@ def _handle_sql_workflow_action(request_id, txn):
 
         if action == workflow.ACTION_REQUESTER_RESPOND:
             txn["rfi_origin_status"] = db.get_last_rfi_origin_status(txn["transaction_key"])
+
+        # The VP/CFO for a stage the approval is about to enter is looked up now (never earlier, never replaced once
+        # set) and written by the same SQL transition below. Zero or several eligible users stop the approval here,
+        # before anything is written.
+        resolved_approvers = {}
+        if action == workflow.ACTION_APPROVE:
+            resolved_approvers = workflow.resolve_missing_approvers(
+                txn, find_vp_candidates=db.get_eligible_vp_user_keys, find_cfo_candidates=db.get_eligible_cfo_user_keys)
+            txn.update(resolved_approvers)
 
         # determine_next_step() also validates Property-vs-Corporate action
         # eligibility (e.g. Treasury Initiated only for Property) — must run
@@ -3192,12 +3811,11 @@ def _handle_sql_workflow_action(request_id, txn):
                 return redirect(url_for("request_detail", request_id=request_id))
             evidence_correlation_id = uploaded.get("correlation_id")
 
-        # Optional new file attached in the resubmitModal (comment may satisfy
-        # the requester_respond requirement on its own — see the guard above —
-        # so this file is best-effort, not required, unlike _EVIDENCE_REQUIRED_ACTIONS).
-        if action == workflow.ACTION_REQUESTER_RESPOND:
-            resubmit_file = request.files.get("resubmit_file")
-            if resubmit_file and resubmit_file.filename and sharepoint_enabled():
+        # Optional new files attached with the response (a comment may satisfy the requirement on its own — see the
+        # guard above — so these are best-effort, not required, unlike _EVIDENCE_REQUIRED_ACTIONS). Any failed upload
+        # stops the response; files stored before the failure stay on the transaction.
+        if action == workflow.ACTION_REQUESTER_RESPOND and resubmit_files and sharepoint_enabled():
+            for resubmit_file in resubmit_files:
                 try:
                     uploaded = sharepoint.upload_attachment(
                         request_id, resubmit_file,
@@ -3208,7 +3826,12 @@ def _handle_sql_workflow_action(request_id, txn):
                         evidence_correlation_id = uploaded.get("correlation_id")
                 except Exception:
                     app.logger.exception("Resubmit attachment upload failed for %s", request_id)
-                    flash("The new attachment could not be uploaded; the resubmission was not completed.", "danger")
+                    flash(
+                        f"Your response was NOT submitted: \u201c{escape(resubmit_file.filename)}\u201d could not be uploaded. "
+                        "Your text was kept below and documents already uploaded remain attached; "
+                        "please try again. The transaction is still waiting for your information.",
+                        "danger",
+                    )
                     return redirect(url_for("request_detail", request_id=request_id))
 
         if satisfied and len(satisfied) > 1:
@@ -3226,8 +3849,14 @@ def _handle_sql_workflow_action(request_id, txn):
             workflow_role=owner_role,
             comments=comment or None,
             bank_releaser_user_key=new_owner if action == workflow.ACTION_TREASURY_INITIATED else None,
+            vp_approver_user_key=resolved_approvers.get("vp_approver_user_key"),
+            cfo_approver_user_key=resolved_approvers.get("cfo_approver_user_key"),
         )
-        flash(f"Action recorded: <strong>{label}</strong> for {request_id}.", cat)
+        outcome["advanced"] = True
+        if action == workflow.ACTION_REQUESTER_RESPOND:
+            flash(_rfi_response_success_message(request_id, new_status, owner_role, new_owner), "success")
+        else:
+            flash(f"Action recorded: <strong>{label}</strong> for {request_id}.", cat)
 
         if comment and user_key is not None:
             comment_type = workflow.ACTION_COMMENT_TYPE_MAP.get(action)
@@ -3256,7 +3885,11 @@ def _handle_sql_workflow_action(request_id, txn):
                 "SharePoint file) request_id=%s action=%s correlation_id=%s",
                 request_id, action, evidence_correlation_id,
             )
-        flash("This action was already processed for this transaction.", "info")
+        if action == workflow.ACTION_REQUESTER_RESPOND:
+            flash("This response was already submitted, or the request is no longer waiting for your information. "
+                  "Nothing was recorded twice.", "info")
+        else:
+            flash("This action was already processed for this transaction.", "info")
     except Exception:
         if evidence_correlation_id:
             app.logger.warning(
@@ -3265,7 +3898,11 @@ def _handle_sql_workflow_action(request_id, txn):
                 request_id, action, evidence_correlation_id,
             )
         app.logger.exception("Workflow action failed for %s", request_id)
-        flash("Unable to process this action. Please try again.", "danger")
+        if action == workflow.ACTION_REQUESTER_RESPOND:
+            flash("Your response was NOT submitted — this transaction is still waiting for your information. "
+                  "Your text was kept below; please try again.", "danger")
+        else:
+            flash("Unable to process this action. Please try again.", "danger")
 
     return redirect(url_for("request_detail", request_id=request_id))
 
@@ -3544,6 +4181,18 @@ def request_attach(request_id):
         flash("Request not found.", "warning")
         return redirect(url_for("dashboard"))
 
+    # An upload is NOT a response: while this transaction awaits the requester, only the requester_respond action
+    # may send the information back for review, so the requester is told that explicitly after uploading.
+    awaiting_requester_response = False
+    if is_sql_backed:
+        try:
+            workflow.authorize_action(
+                role=roles, user_key=user_key, txn=txn_summary, action=workflow.ACTION_REQUESTER_RESPOND)
+            awaiting_requester_response = True
+        except workflow.UnauthorizedActionError:
+            pass
+
+    uploaded_count = 0
     if sharepoint_enabled():
         for file_storage in uploaded_files:
             if not file_storage.filename:
@@ -3554,9 +4203,10 @@ def request_attach(request_id):
                     section=sharepoint.SECTION_ADDITIONAL, doc_type=sharepoint.DOC_TYPE_OTHER,
                     uploaded_by_role=uploader, description=description,
                 )
+                uploaded_count += 1
             except Exception:
                 app.logger.exception("SharePoint upload failed for extra_files on %s", request_id)
-                flash("One or more files could not be uploaded to SharePoint.", "danger")
+                flash(f"\u201c{escape(file_storage.filename)}\u201d could not be uploaded to SharePoint.", "danger")
 
     new_entries = [
         {"filename": fn, "description": description, "uploaded_by": uploader, "date": today}
@@ -3572,8 +4222,19 @@ def request_attach(request_id):
                 updated = True
         session["submitted_requests"] = submitted
 
-    if updated:
-        flash(f"{len(filenames)} file(s) attached to {request_id}.", "success")
+    if is_sql_backed and not sharepoint_enabled():
+        flash("File storage is not available right now; no files were attached.", "warning")
+    elif is_sql_backed and uploaded_count == 0:
+        pass  # every failure was already reported above; never follow it with a success message
+    elif awaiting_requester_response:
+        flash(
+            f"{uploaded_count} file(s) uploaded to {escape(request_id)}. <strong>Your response has NOT been submitted yet.</strong> "
+            "Select <strong>Submit Additional Information</strong> in the Additional Information Requested section "
+            "to send your response for review.",
+            "warning",
+        )
+    elif updated:
+        flash(f"{uploaded_count if is_sql_backed else len(filenames)} file(s) attached to {request_id}.", "success")
     else:
         flash(
             f"Note: {request_id} is pre-loaded mock data. "
