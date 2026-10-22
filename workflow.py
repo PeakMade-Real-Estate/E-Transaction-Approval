@@ -479,7 +479,8 @@ def determine_next_step(txn: dict, action: str):
                 return _route_after_controller(txn, satisfied)
             if same_person_approver_controller(txn):
                 satisfied.append("Controller")
-                return _route_after_controller(txn, satisfied)
+                # When that same person is also the assigned VP, this one approval fulfils all three roles.
+                return _route_after_controller(txn, satisfied, combined_user_key=txn.get("selected_approver_user_key"))
             return STATUS_PENDING_CONTROLLER, txn.get("selected_controller_user_key"), "Controller", satisfied
 
         if status == STATUS_PENDING_CONTROLLER:
@@ -524,14 +525,23 @@ def determine_next_step(txn: dict, action: str):
     raise UnauthorizedActionError("Unknown action.")
 
 
-def _route_after_controller(txn: dict, satisfied: list):
+def _route_after_controller(txn: dict, satisfied: list, combined_user_key=None):
+    """
+    Next stage once the Controller responsibility is satisfied. `combined_user_key` is passed only for the combined
+    Approver+Controller approval: if the assigned VP is that same user, the VP responsibility is satisfied by the same
+    action and the transaction moves straight to the next stage that still needs someone (CFO, else Treasury). Any other
+    VP (including the same person after a DIFFERENT Controller acted in between) keeps its own Pending VP stage.
+    """
     if txn.get("requires_vp"):
         vp_key = txn.get("vp_approver_user_key")
         if not vp_key:
             raise WorkflowConfigurationError(
                 "VP approval is required but no VP is assigned to this transaction."
             )
-        return STATUS_PENDING_VP, vp_key, "VP", satisfied
+        if combined_user_key is not None and vp_key == combined_user_key:
+            satisfied = satisfied + ["VP"]
+        else:
+            return STATUS_PENDING_VP, vp_key, "VP", satisfied
     if txn.get("requires_cfo"):
         cfo_key = txn.get("cfo_approver_user_key")
         if not cfo_key:
@@ -613,17 +623,23 @@ def _exactly_one(user_keys, description: str) -> int:
 
 def resolve_missing_approvers(txn: dict, *, find_vp_candidates, find_cfo_candidates) -> dict:
     """
-    {"vp_approver_user_key": key} or {"cfo_approver_user_key": key} for the stage an approval is about to enter, or {}
-    when nothing needs resolving. Never replaces an assignment the transaction already has. Raises
-    WorkflowConfigurationError for zero or several candidates - no alphabetical, random or Controller fallback.
+    The VP and/or CFO this approval needs to assign, as {"vp_approver_user_key": key, "cfo_approver_user_key": key} (only
+    the keys that need resolving), or {} when nothing does. Usually one key; both when a single approval by someone who
+    is Approver, Controller and VP skips the VP stage and lands on the CFO. Never replaces an assignment the transaction
+    already has. Raises WorkflowConfigurationError for zero or several candidates - no alphabetical, random or Controller
+    fallback.
 
     find_vp_candidates(team) / find_cfo_candidates() return the User_Keys of the active holders of the role
     (db.get_eligible_vp_user_keys / db.get_eligible_cfo_user_keys).
     """
-    needed = _assignee_needed_by_approval(txn)
-    if needed == "vp":
-        team = vp_team_for_classification(txn.get("entity_classification"))
-        return {"vp_approver_user_key": _exactly_one(find_vp_candidates(team), f"VP on the {team} team")}
-    if needed == "cfo":
-        return {"cfo_approver_user_key": _exactly_one(find_cfo_candidates(), "CFO")}
-    return {}
+    resolved = {}
+    for _ in range(2):
+        needed = _assignee_needed_by_approval({**txn, **resolved})
+        if needed == "vp":
+            team = vp_team_for_classification(txn.get("entity_classification"))
+            resolved["vp_approver_user_key"] = _exactly_one(find_vp_candidates(team), f"VP on the {team} team")
+        elif needed == "cfo":
+            resolved["cfo_approver_user_key"] = _exactly_one(find_cfo_candidates(), "CFO")
+        else:
+            break
+    return resolved

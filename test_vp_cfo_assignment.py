@@ -175,11 +175,12 @@ class ApprovalChainTests(unittest.TestCase):
         status, owner, _, satisfied = _step(txn, "sam", APPR)
         self.assertEqual((status, satisfied), (wf.STATUS_READY_FOR_TREASURY, ["Approver", "Controller"]))
 
-    def test_12_a_combined_approver_controller_who_is_also_the_vp_still_needs_a_separate_vp_action(self):
+    def test_12_one_approval_by_someone_who_is_approver_controller_and_vp_satisfies_all_three(self):
+        # Superseded rule (business clarification): the same person in all three roles approves ONCE.
         txn = _vp_txn(selected_approver_user_key=NICOLE, selected_controller_user_key=NICOLE, current_owner_user_key=NICOLE)
         status, owner, role, satisfied = _step(txn, "sam", NICOLE)
-        self.assertEqual((status, owner, role, satisfied), (wf.STATUS_PENDING_VP, NICOLE, "VP", ["Approver", "Controller"]))
-        self.assertEqual(_step(txn, "vp", NICOLE)[0], wf.STATUS_READY_FOR_TREASURY)
+        self.assertEqual((status, owner, role, satisfied), (wf.STATUS_READY_FOR_TREASURY, None, "Treasury", ["Approver", "Controller", "VP"]))
+        self.assertEqual(txn["vp_approver_user_key"], NICOLE)
 
     def test_13_a_cfo_level_transaction_goes_approver_controller_vp_cfo_treasury(self):
         txn = _vp_txn(requires_cfo=True, selected_approver_user_key=NICOLE, selected_controller_user_key=CTRL, current_owner_user_key=NICOLE)

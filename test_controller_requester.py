@@ -415,74 +415,131 @@ def _vp_assigned(**over):
 
 
 class CombinedApprovalChainTests(unittest.TestCase):
-    def test_7_the_vp_completes_the_initial_approver_and_controller_approvals_in_one_action(self):
-        txn = _vp_assigned(requires_vp=False)
-        status, owner, _, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
-        self.assertEqual((status, owner, satisfied), (wf.STATUS_READY_FOR_TREASURY, None, ["Approver", "Controller"]))
+    ALL_THREE = ["Approver", "Controller", "VP"]
 
-    def test_8_a_750k_request_requires_a_separate_vp_approval_by_the_same_person(self):
+    def test_1_approver_controller_and_vp_the_same_person_below_the_cfo_threshold_one_approval_then_treasury(self):
         txn = _vp_assigned()
         status, owner, role, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
-        self.assertEqual((status, owner, role, satisfied), (wf.STATUS_PENDING_VP, vpt.NICOLE, "VP", ["Approver", "Controller"]))
-        self.assertEqual(txn["vp_approver_user_key"], vpt.NICOLE)
-        status, owner, _, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
-        self.assertEqual((status, owner, satisfied), (wf.STATUS_READY_FOR_TREASURY, None, ["VP"]))
+        self.assertEqual((status, owner, role, satisfied), (wf.STATUS_READY_FOR_TREASURY, None, "Treasury", self.ALL_THREE))
+        self.assertEqual(txn["vp_approver_user_key"], vpt.NICOLE)          # the VP responsibility is recorded on the transaction
 
-    def test_9_a_1m_request_goes_combined_then_vp_then_cfo_then_treasury(self):
+    def test_2_the_same_person_in_all_three_roles_with_a_cfo_required_approves_once_then_the_cfo_acts(self):
         txn = _vp_assigned(requires_cfo=True)
-        trail = [vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)[:2], vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)[:2],
-                 vpt._step(txn, "cfo", vpt.WENDY)[:2]]
-        self.assertEqual(trail, [(wf.STATUS_PENDING_VP, vpt.NICOLE), (wf.STATUS_PENDING_CFO, vpt.WENDY), (wf.STATUS_READY_FOR_TREASURY, None)])
+        status, owner, role, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
+        self.assertEqual((status, owner, role, satisfied), (wf.STATUS_PENDING_CFO, vpt.WENDY, "CFO", self.ALL_THREE))
+        self.assertEqual((txn["vp_approver_user_key"], txn["cfo_approver_user_key"]), (vpt.NICOLE, vpt.WENDY))
+        self.assertEqual(vpt._step(txn, "cfo", vpt.WENDY)[:2], (wf.STATUS_READY_FOR_TREASURY, None))
 
-    def test_9_two_active_cfos_still_fail_safely(self):
-        txn = _vp_assigned(requires_cfo=True, status=wf.STATUS_PENDING_VP, vp_approver_user_key=vpt.NICOLE)
-        with self.assertRaisesRegex(wf.WorkflowConfigurationError, "More than one eligible CFO"):
-            vpt._step(txn, "vp", vpt.NICOLE, cfos=[vpt.WENDY, vpt.OTHER_CFO])
+    def test_3_7_a_different_controller_is_never_skipped_and_the_vp_acts_separately_afterwards(self):
+        txn = _vp_assigned(selected_controller_user_key=vpt.CTRL, requires_cfo=True)
+        trail = [vpt._step(txn, "sam", vpt.NICOLE)[:3], vpt._step(txn, "controller", vpt.CTRL)[:3],
+                 vpt._step(txn, "vp", vpt.NICOLE)[:3], vpt._step(txn, "cfo", vpt.WENDY)[:3]]
+        self.assertEqual(trail, [(wf.STATUS_PENDING_CONTROLLER, vpt.CTRL, "Controller"), (wf.STATUS_PENDING_VP, vpt.NICOLE, "VP"),
+                                 (wf.STATUS_PENDING_CFO, vpt.WENDY, "CFO"), (wf.STATUS_READY_FOR_TREASURY, None, "Treasury")])
 
-    def test_10_the_controller_stage_is_never_skipped_for_a_different_assignee(self):
-        txn = _vp_assigned(selected_controller_user_key=vpt.CTRL)
-        self.assertEqual(vpt._step(txn, "sam", vpt.NICOLE)[:3], (wf.STATUS_PENDING_CONTROLLER, vpt.CTRL, "Controller"))
-
-    def test_the_vp_stage_after_the_combined_approval_resolves_the_same_team_vp(self):
+    def test_4_5_the_vp_is_always_the_one_for_the_transactions_team(self):
         for classification, vp in (("Corporate", vpt.NICOLE), ("Property", vpt.SEUNG)):
             with self.subTest(classification=classification):
                 txn = _vp_assigned(entity_classification=classification, selected_approver_user_key=vp, selected_controller_user_key=vp)
-                self.assertEqual(vpt._step(txn, {"sam", "vp"}, vp)[:3], (wf.STATUS_PENDING_VP, vp, "VP"))
+                self.assertEqual(vpt._step(txn, {"sam", "vp"}, vp)[:2], (wf.STATUS_READY_FOR_TREASURY, None))
+                self.assertEqual(txn["vp_approver_user_key"], vp)
+                txn = _vp_assigned(entity_classification=classification, selected_approver_user_key=vp, selected_controller_user_key=vp, requires_cfo=True)
+                self.assertEqual(vpt._step(txn, {"sam", "vp"}, vp)[:3], (wf.STATUS_PENDING_CFO, vpt.WENDY, "CFO"))
 
-    def test_22_23_only_the_assigned_vp_may_take_the_combined_action(self):
+    def test_4_the_shortcut_needs_the_resolved_vp_to_be_that_exact_user_key(self):
+        txn = _vp_assigned(selected_approver_user_key=vpt.APPR, selected_controller_user_key=vpt.APPR)    # approver==controller, VP is someone else
+        self.assertEqual(vpt._step(txn, "sam", vpt.APPR)[:3], (wf.STATUS_PENDING_VP, vpt.NICOLE, "VP"))
+        stale = _vp_assigned(vp_approver_user_key=vpt.SEUNG)                                               # a different VP already stored
+        self.assertEqual(vpt._step(stale, {"sam", "vp"}, vpt.NICOLE)[:3], (wf.STATUS_PENDING_VP, vpt.SEUNG, "VP"))
+
+    def test_only_two_matching_roles_keep_the_existing_rules_no_new_shortcuts(self):
+        controller_is_vp = _vp_assigned(selected_approver_user_key=vpt.APPR, selected_controller_user_key=vpt.NICOLE)
+        self.assertEqual(vpt._step(controller_is_vp, "sam", vpt.APPR)[:2], (wf.STATUS_PENDING_CONTROLLER, vpt.NICOLE))
+        self.assertEqual(vpt._step(controller_is_vp, "controller", vpt.NICOLE)[:3], (wf.STATUS_PENDING_VP, vpt.NICOLE, "VP"))
+        approver_is_controller = _vp_assigned(selected_approver_user_key=vpt.APPR, selected_controller_user_key=vpt.APPR)
+        status, _, _, satisfied = vpt._step(approver_is_controller, "sam", vpt.APPR)
+        self.assertEqual((status, satisfied), (wf.STATUS_PENDING_VP, ["Approver", "Controller"]))
+        approver_is_vp = _vp_assigned(selected_controller_user_key=vpt.CTRL)
+        self.assertEqual(vpt._step(approver_is_vp, "sam", vpt.NICOLE)[0], wf.STATUS_PENDING_CONTROLLER)
+
+    def test_14_the_normal_approver_controller_shortcut_is_unchanged(self):
+        txn = _txn(selected_controller_user_key=vpt.APPR)
+        status, _, _, satisfied = vpt._step(txn, "sam", vpt.APPR)
+        self.assertEqual((status, satisfied), (wf.STATUS_READY_FOR_TREASURY, ["Approver", "Controller"]))
+
+    def test_6_the_cfo_is_never_collapsed_into_another_role(self):
+        txn = _vp_assigned(requires_cfo=True)
+        status, owner, role, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE, cfos=[vpt.NICOLE])   # even if the CFO is the same person
+        self.assertEqual((status, owner, role), (wf.STATUS_PENDING_CFO, vpt.NICOLE, "CFO"))
+        self.assertNotIn("CFO", satisfied)
+        self.assertEqual(vpt._step(txn, "cfo", vpt.NICOLE)[:2], (wf.STATUS_READY_FOR_TREASURY, None))
+
+    def test_13_a_failed_cfo_resolution_changes_nothing(self):
+        for cfos in ([], [vpt.WENDY, vpt.OTHER_CFO]):
+            with self.subTest(cfos=cfos):
+                txn = _vp_assigned(requires_cfo=True)
+                before = dict(txn)
+                with self.assertRaises(wf.WorkflowConfigurationError):
+                    vpt._step(txn, {"sam", "vp"}, vpt.NICOLE, cfos=cfos)
+                self.assertEqual(txn, before)               # no VP key, owner or status was recorded either
+
+    def test_a_missing_or_ambiguous_vp_changes_nothing(self):
+        for vps in ({"CA": []}, {"CA": [vpt.NICOLE, 99]}):
+            with self.subTest(vps=vps):
+                txn = _vp_assigned()
+                before = dict(txn)
+                with self.assertRaises(wf.WorkflowConfigurationError):
+                    vpt._step(txn, {"sam", "vp"}, vpt.NICOLE, vps=vps)
+                self.assertEqual(txn, before)
+
+    def test_requires_no_vp_means_the_original_combined_approval_only(self):
+        txn = _vp_assigned(requires_vp=False)
+        status, _, _, satisfied = vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
+        self.assertEqual((status, satisfied), (wf.STATUS_READY_FOR_TREASURY, ["Approver", "Controller"]))
+
+    def test_11_only_the_assigned_user_may_take_the_combined_action(self):
         txn = _vp_assigned()
         wf.authorize_action(role={"sam", "vp"}, user_key=vpt.NICOLE, txn=txn, action=wf.ACTION_APPROVE)
-        for role, key in (({"sam", "vp"}, vpt.SEUNG), ("vp", vpt.NICOLE), ("controller", vpt.NICOLE), ("submitter", REQUESTER)):
+        for role, key in (({"sam", "vp"}, vpt.SEUNG), ("vp", vpt.NICOLE), ("controller", vpt.NICOLE), ("submitter", REQUESTER),
+                          ({"sam", "controller", "submitter"}, REQUESTER)):
             with self.subTest(role=role, key=key), self.assertRaises(wf.UnauthorizedActionError):
                 wf.authorize_action(role=role, user_key=key, txn=txn, action=wf.ACTION_APPROVE)
 
-    def test_the_requesting_controller_cannot_approve_their_own_request(self):
+    def test_the_combined_approval_needs_the_approver_role_not_the_controller_role(self):
         txn = _vp_assigned()
-        for role in ({"sam", "controller", "submitter"}, "controller", "sam"):
-            with self.subTest(role=role), self.assertRaises(wf.UnauthorizedActionError):
-                wf.authorize_action(role=role, user_key=REQUESTER, txn=txn, action=wf.ACTION_APPROVE)
-
-    def test_the_combined_approval_needs_no_controller_role_but_does_need_the_approver_role(self):
-        txn = _vp_assigned()
-        wf.authorize_action(role={"sam", "vp"}, user_key=vpt.NICOLE, txn=txn, action=wf.ACTION_APPROVE)   # no 'controller' role needed
-        with self.assertRaises(wf.UnauthorizedActionError):                                                   # hence intake requires 'sam'
+        wf.authorize_action(role={"sam", "vp"}, user_key=vpt.NICOLE, txn=txn, action=wf.ACTION_APPROVE)
+        with self.assertRaises(wf.UnauthorizedActionError):
             wf.authorize_action(role={"vp"}, user_key=vpt.NICOLE, txn=txn, action=wf.ACTION_APPROVE)
+
+    def test_a_finished_transaction_accepts_no_second_approval(self):
+        txn = _vp_assigned()
+        vpt._step(txn, {"sam", "vp"}, vpt.NICOLE)
+        with self.assertRaises(wf.UnauthorizedActionError):         # now Ready for Treasury: a repeat approval is refused
+            wf.authorize_action(role={"sam", "vp"}, user_key=vpt.NICOLE, txn=txn, action=wf.ACTION_APPROVE)
 
 
 class EventContractTests(unittest.TestCase):
-    def test_24_25_the_combined_approval_writes_the_existing_events_once_and_no_controller_assignment(self):
-        txn = _txn(selected_approver_user_key=vpt.NICOLE, selected_controller_user_key=vpt.NICOLE, requires_vp=True,
-                   vp_approver_user_key=vpt.NICOLE, entity_classification="Corporate")
-        w = _run(wf.ACTION_APPROVE, txn, actor=vpt.NICOLE)
-        self.assertEqual(w.event_types, ["approve", "VP_ASSIGNED"])
-        self.assertEqual(w.assignment[1:3], ["VP", vpt.NICOLE])
-        self.assertEqual(sum("INSERT INTO etransactions.WorkflowAssignment" in s for s in w.statements), 1)
-        self.assertEqual(w.related("VP_ASSIGNED"), 77)
+    def _txn(self, **over):
+        return _txn(**{**dict(selected_approver_user_key=vpt.NICOLE, selected_controller_user_key=vpt.NICOLE, requires_vp=True,
+                    vp_approver_user_key=vpt.NICOLE, entity_classification="Corporate"), **over})
 
-    def test_without_a_vp_requirement_the_combined_approval_only_reports_ready_for_treasury(self):
-        txn = _txn(selected_approver_user_key=vpt.NICOLE, selected_controller_user_key=vpt.NICOLE)
-        w = _run(wf.ACTION_APPROVE, txn, actor=vpt.NICOLE)
+    def test_8_9_10_a_three_role_approval_with_a_cfo_writes_approve_and_cfo_assigned_with_one_consistent_assignment(self):
+        w = _run(wf.ACTION_APPROVE, self._txn(requires_cfo=True), actor=vpt.NICOLE)
+        self.assertEqual(w.event_types, ["approve", "CFO_ASSIGNED"])
+        self.assertEqual((w.owner, w.assignment[1:3]), (w.assignment[2], ["CFO", w.owner]))       # CurrentOwner == the new assignment
+        self.assertEqual(sum("INSERT INTO etransactions.WorkflowAssignment" in s for s in w.statements), 1)
+        self.assertEqual((w.related("approve"), w.related("CFO_ASSIGNED")), (None, 77))
+        for absent in ("VP_ASSIGNED", "CONTROLLER_ASSIGNED"):                                     # no artificial stage, no duplicate email trigger
+            self.assertNotIn(absent, w.event_types)
+
+    def test_a_three_role_approval_without_a_cfo_writes_approve_and_ready_for_treasury(self):
+        w = _run(wf.ACTION_APPROVE, self._txn(), actor=vpt.NICOLE)
         self.assertEqual(w.event_types, ["approve", "READY_FOR_TREASURY"])
+        self.assertIsNone(w.assignment)
+
+    def test_a_different_controller_still_produces_the_controller_assignment(self):
+        w = _run(wf.ACTION_APPROVE, self._txn(selected_controller_user_key=vpt.CTRL), actor=vpt.NICOLE)
+        self.assertEqual(w.event_types, ["approve", "CONTROLLER_ASSIGNED"])
 
     def test_the_event_literals_and_assignment_events_are_unchanged(self):
         self.assertEqual([wf.EVENT_REQUEST_SUBMITTED, wf.EVENT_APPROVER_ASSIGNED, wf.EVENT_CONTROLLER_ASSIGNED, wf.EVENT_APPROVAL,
@@ -496,38 +553,136 @@ class EventContractTests(unittest.TestCase):
         self.assertEqual(wf.determine_next_step(txn, wf.ACTION_REQUESTER_RESPOND)[:3], (wf.STATUS_PENDING_APPROVER, vpt.NICOLE, "Approver"))
 
 
+class AtomicTransitionTests(unittest.TestCase):
+    def _advance(self, *, rowcount=1, fail_on=None):
+        cur = MagicMock()
+        cur.rowcount = rowcount
+        cur.fetchone.return_value = (77,)
+        if fail_on:
+            def execute(sql, *a):
+                if fail_on in sql:
+                    raise RuntimeError("boom")
+            cur.execute.side_effect = execute
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        with patch.object(db, "get_connection", return_value=conn):
+            db.advance_transaction_workflow(
+                1, from_status=wf.STATUS_PENDING_APPROVER, new_status=wf.STATUS_PENDING_CFO, new_owner_user_key=vpt.WENDY,
+                actor_user_key=vpt.NICOLE, actor_role="r", action=wf.ACTION_APPROVE, workflow_role="CFO",
+                vp_approver_user_key=vpt.NICOLE, cfo_approver_user_key=vpt.WENDY)
+        return cur, conn
+
+    def test_the_vp_key_cfo_key_owner_assignment_and_events_are_one_transaction(self):
+        cur, conn = self._advance()
+        sql, params = cur.execute.call_args_list[0].args
+        self.assertIn("VPApprover_User_Key = ?", sql)
+        self.assertIn("CFOApprover_User_Key = ?", sql)
+        self.assertTrue(sql.rstrip().endswith("AND VPApprover_User_Key IS NULL AND CFOApprover_User_Key IS NULL"))
+        self.assertIn(wf.STATUS_PENDING_CFO, params)
+        self.assertEqual(params[-1], wf.STATUS_PENDING_APPROVER)                          # guarded by the expected status
+        conn.commit.assert_called_once()
+
+    def test_12_a_duplicate_action_writes_nothing(self):
+        cur = MagicMock()
+        cur.rowcount = 0
+        conn = MagicMock()
+        conn.cursor.return_value = cur
+        with patch.object(db, "get_connection", return_value=conn), self.assertRaises(db.WorkflowConflictError):
+            db.advance_transaction_workflow(
+                1, from_status=wf.STATUS_PENDING_APPROVER, new_status=wf.STATUS_PENDING_CFO, new_owner_user_key=vpt.WENDY,
+                actor_user_key=vpt.NICOLE, actor_role="r", action=wf.ACTION_APPROVE, workflow_role="CFO",
+                vp_approver_user_key=vpt.NICOLE, cfo_approver_user_key=vpt.WENDY)
+        self.assertEqual(cur.execute.call_count, 1)
+        conn.rollback.assert_called_once()
+        conn.commit.assert_not_called()
+
+    def test_a_failure_part_way_rolls_everything_back(self):
+        for fail_on in ("INSERT INTO etransactions.WorkflowAssignment", "INSERT INTO etransactions.WorkflowEvent"):
+            with self.subTest(fail_on=fail_on):
+                conn = MagicMock()
+                with self.assertRaises(RuntimeError):
+                    with patch.object(db, "get_connection", return_value=conn):
+                        cur = MagicMock(rowcount=1)
+                        cur.fetchone.return_value = (77,)
+                        cur.execute.side_effect = lambda sql, *a: (_ for _ in ()).throw(RuntimeError("boom")) if fail_on in sql else None
+                        conn.cursor.return_value = cur
+                        db.advance_transaction_workflow(
+                            1, from_status=wf.STATUS_PENDING_APPROVER, new_status=wf.STATUS_PENDING_CFO, new_owner_user_key=vpt.WENDY,
+                            actor_user_key=vpt.NICOLE, actor_role="r", action=wf.ACTION_APPROVE, workflow_role="CFO",
+                            vp_approver_user_key=vpt.NICOLE, cfo_approver_user_key=vpt.WENDY)
+                conn.rollback.assert_called_once()
+                conn.commit.assert_not_called()
+
+
 class CombinedApprovalRouteTests(unittest.TestCase):
     setUp = vpt.RouteTests.setUp
     _post = vpt.RouteTests._post
 
-    def test_the_route_records_the_combined_approval_and_assigns_the_same_vp_to_the_vp_stage(self):
+    def test_1_the_route_records_one_approval_for_all_three_roles_and_sends_the_transaction_to_treasury(self):
         txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER)
         resp, advance, flashes = self._post("sam", vpt.NICOLE, txn)
         kwargs = advance.call_args.kwargs
-        self.assertEqual((kwargs["new_status"], kwargs["new_owner_user_key"], kwargs["workflow_role"], kwargs["vp_approver_user_key"]),
-                         (wf.STATUS_PENDING_VP, vpt.NICOLE, "VP", vpt.NICOLE))
-        self.assertIn("One approval satisfied: Approver, Controller (same employee).", kwargs["comments"])
+        self.assertEqual((kwargs["new_status"], kwargs["new_owner_user_key"], kwargs["vp_approver_user_key"], kwargs["cfo_approver_user_key"]),
+                         (wf.STATUS_READY_FOR_TREASURY, None, vpt.NICOLE, None))
+        self.assertIn("One approval satisfied: Approver, Controller, VP (same employee).", kwargs["comments"])
         self.vp_lookup.assert_called_once_with("CA")
+        self.cfo_lookup.assert_not_called()
         self.assertEqual(flashes[0][0], "success")
 
-    def test_the_second_vp_approval_is_a_separate_action_and_assigns_no_new_vp(self):
-        txn = _vp_assigned(status=wf.STATUS_PENDING_VP, vp_approver_user_key=vpt.NICOLE)
-        resp, advance, _ = self._post("vp", vpt.NICOLE, txn)
+    def test_2_the_route_assigns_the_cfo_in_the_same_call_for_a_cfo_level_transaction(self):
+        txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER, requires_cfo=True)
+        resp, advance, flashes = self._post("sam", vpt.NICOLE, txn)
+        advance.assert_called_once()
         kwargs = advance.call_args.kwargs
-        self.assertEqual((kwargs["new_status"], kwargs["vp_approver_user_key"]), (wf.STATUS_READY_FOR_TREASURY, None))
+        self.assertEqual((kwargs["new_status"], kwargs["new_owner_user_key"], kwargs["workflow_role"],
+                          kwargs["vp_approver_user_key"], kwargs["cfo_approver_user_key"]),
+                         (wf.STATUS_PENDING_CFO, vpt.WENDY, "CFO", vpt.NICOLE, vpt.WENDY))
+        self.assertIn("Approver, Controller, VP", kwargs["comments"])
+        self.cfo_lookup.assert_called_once_with()
+
+    def test_5_a_property_transaction_uses_the_pa_vp(self):
+        txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER, entity_classification="Property",
+                           selected_approver_user_key=vpt.SEUNG, selected_controller_user_key=vpt.SEUNG, current_owner_user_key=vpt.SEUNG)
+        resp, advance, _ = self._post("sam", vpt.SEUNG, txn, vps=(vpt.SEUNG,))
+        self.vp_lookup.assert_called_once_with("PA")
+        kwargs = advance.call_args.kwargs
+        self.assertEqual((kwargs["new_status"], kwargs["vp_approver_user_key"]), (wf.STATUS_READY_FOR_TREASURY, vpt.SEUNG))
+
+    def test_13_two_active_cfos_stop_the_approval_before_anything_is_written(self):
+        txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER, requires_cfo=True)
+        resp, advance, flashes = self._post("sam", vpt.NICOLE, txn, cfos=(vpt.WENDY, vpt.OTHER_CFO))
+        advance.assert_not_called()
+        self.assertIn("More than one eligible CFO", flashes[0][1])
+        self.assertEqual(flashes[0][0], "danger")
+
+    def test_3_a_different_controller_keeps_the_original_chain_and_looks_up_no_vp_yet(self):
+        txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER, selected_controller_user_key=vpt.CTRL)
+        resp, advance, _ = self._post("sam", vpt.NICOLE, txn)
+        kwargs = advance.call_args.kwargs
+        self.assertEqual((kwargs["new_status"], kwargs["new_owner_user_key"], kwargs["workflow_role"], kwargs["vp_approver_user_key"]),
+                         (wf.STATUS_PENDING_CONTROLLER, vpt.CTRL, "Controller", None))
         self.vp_lookup.assert_not_called()
 
-    def test_23_another_vp_cannot_act_on_the_transaction(self):
+    def test_3_the_vp_acts_separately_after_a_different_controller(self):
+        txn = _vp_assigned(status=wf.STATUS_PENDING_VP, selected_controller_user_key=vpt.CTRL, vp_approver_user_key=vpt.NICOLE)
+        resp, advance, _ = self._post("vp", vpt.NICOLE, txn)
+        self.assertEqual(advance.call_args.kwargs["new_status"], wf.STATUS_READY_FOR_TREASURY)
+
+    def test_11_another_vp_cannot_act_on_the_transaction(self):
         txn = _vp_assigned(status=wf.STATUS_PENDING_APPROVER)
         resp, advance, flashes = self._post("sam", vpt.SEUNG, txn)
         advance.assert_not_called()
         self.assertEqual(flashes[0][0], "warning")
 
+    def test_12_a_repeated_click_is_reported_as_already_processed(self):
+        resp, advance, flashes = self._post("sam", vpt.NICOLE, _vp_assigned(status=wf.STATUS_PENDING_APPROVER),
+                                            advance_error=db.WorkflowConflictError("moved"))
+        self.assertEqual(flashes, [("info", "This action was already processed for this transaction.")])
+
     def test_a_missing_vp_stops_the_combined_approval_before_anything_is_written(self):
         resp, advance, flashes = self._post("sam", vpt.NICOLE, _vp_assigned(status=wf.STATUS_PENDING_APPROVER), vps=())
         advance.assert_not_called()
         self.assertIn("No eligible VP on the CA team", flashes[0][1])
-
 
 # ═══ Property bank release ═══════════════════════════════════════════════════
 class PropertyBankReleaseTests(unittest.TestCase):
